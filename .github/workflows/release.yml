@@ -54,7 +54,7 @@ on:
       max_duration:
         description: "Recording chunk length (minutes)"
         required: false
-        default: "45"
+        default: "30"
         type: choice
         options: ["15", "30", "45", "60", "90", "120"]
       resolution:
@@ -214,6 +214,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Check disk space BEFORE building to avoid wasting time
+      - name: Check disk space
+        run: |
+          AVAIL_GB=$(df -BG . | awk 'NR==2{gsub(/G/,""); print $4}')
+          echo "Disk available: ${AVAIL_GB}GB"
+          if [[ "$AVAIL_GB" -lt 4 ]]; then
+            echo "::error::Not enough disk space (${AVAIL_GB}GB < 4GB required for build + recording)"
+            echo "::error::Build needs ~1-2GB, recording needs ~2GB minimum"
+            exit 1
+          fi
+          echo "✓ Sufficient disk space available"
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -325,7 +337,7 @@ jobs:
 
           USERNAME="${{ matrix.channel.username }}"
           SITE="${{ matrix.channel.site }}"
-          MAX_DURATION="${{ inputs.max_duration || '45' }}"
+          MAX_DURATION="${{ inputs.max_duration || '30' }}"
           RESOLUTION="${{ inputs.resolution || '9999' }}"
           FRAMERATE="${{ inputs.framerate || '60' }}"
           INTERVAL="${{ inputs.interval || '1' }}"
@@ -340,8 +352,8 @@ jobs:
           # ── Guard: disk space ─────────────────────────────────────────
           AVAIL_GB=$(df -BG . | awk 'NR==2{gsub(/G/,""); print $4}')
           echo "Disk available: ${AVAIL_GB}GB"
-          if [[ "$AVAIL_GB" -lt 3 ]]; then
-            echo "::error::Not enough disk space (${AVAIL_GB}GB < 3GB required)"
+          if [[ "$AVAIL_GB" -lt 2 ]]; then
+            echo "::error::Not enough disk space (${AVAIL_GB}GB < 2GB required)"
             exit 1
           fi
 
@@ -359,41 +371,110 @@ jobs:
           mkdir -p videos/completed
 
           # ── Background disk monitor ───────────────────────────────────
-          # Kills goondvr if disk drops below 1 GB or no new data for 5 min.
+          # Monitors disk space and stream health
+          # Only kills recording if CRITICAL conditions are met
+          # Uses a flag file to coordinate with timeout command
           _MD="$MAX_DURATION"
+          # Use unique flag file per channel to avoid conflicts
+          MONITOR_FLAG="/tmp/monitor_${USERNAME}_${SITE}_$$_$(date +%s)_flag"
+          echo "0" > "$MONITOR_FLAG"  # 0 = running, 1 = monitor killed it
+          export MONITOR_FLAG  # Make available to subshell
+          
+          # Store goondvr PID for precise killing
+          GOONDVR_PID_FILE="/tmp/goondvr_${USERNAME}_${SITE}_$$.pid"
+          
           (
             trap 'exit 0' SIGTERM
             PREV_SIZE=0
             STALE=0
-            MAX_STALE=$(( _MD <= 5 ? 2 : 5 ))
+            # Increase stale tolerance - streams can pause briefly
+            MAX_STALE=$(( _MD <= 15 ? 3 : (_MD <= 30 ? 6 : 10) ))
+            LAST_FILE_COUNT=0
+
+            # Enable nullglob to handle no file matches gracefully
+            shopt -s nullglob
 
             while sleep 60; do
-              AVAIL=$(df -BG . | awk 'NR==2{gsub(/G/,""); print $4}')
-              CURR=$(du -sb videos 2>/dev/null | cut -f1 || echo 0)
-              FCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
+              # Get available disk in MB for more precise monitoring
+              AVAIL_MB=$(df -BM . | awk 'NR==2{gsub(/M/,""); print $4}')
+              
+              # More efficient: check specific files instead of du on entire directory
+              CURR=0
+              FCOUNT=0
+              # Only check completed files (not being actively written)
+              for f in videos/completed/*.ts videos/completed/*.mp4; do
+                [[ -f "$f" ]] || continue
+                FCOUNT=$((FCOUNT + 1))
+                FSIZE=$(stat -c%s "$f" 2>/dev/null || echo 0)
+                CURR=$((CURR + FSIZE))
+              done
+              
               SIZE_MB=$(awk "BEGIN{printf \"%.1f\", $CURR/1048576}")
+              AVAIL_GB=$(awk "BEGIN{printf \"%.1f\", $AVAIL_MB/1024}")
               
               if [[ "$FCOUNT" -gt 0 ]]; then
-                echo "⏳ [MONITOR] Disk: ${AVAIL}GB | Recording: ${FCOUNT} file(s) | Size: ${SIZE_MB}MB"
+                echo "⏳ [MONITOR] Disk: ${AVAIL_GB}GB | Recording: ${FCOUNT} file(s) | Size: ${SIZE_MB}MB"
               fi
 
-              if [[ "$AVAIL" -lt 1 ]]; then
-                echo "🛑 [MONITOR] Critical disk space — stopping"
-                pkill -f goondvr || true; break
+              # CRITICAL: Only stop if disk is REALLY low (< 300 MB)
+              if [[ "$AVAIL_MB" -lt 300 ]]; then
+                echo "🛑 [MONITOR] CRITICAL disk space (${AVAIL_MB}MB < 300MB) — emergency stop"
+                echo "1" > "$MONITOR_FLAG"  # Signal that monitor killed it
+                
+                # Kill using PID file if available, otherwise use pkill
+                if [[ -f "$GOONDVR_PID_FILE" ]]; then
+                  GOONDVR_PID=$(cat "$GOONDVR_PID_FILE" 2>/dev/null)
+                  kill -TERM "$GOONDVR_PID" 2>/dev/null || true
+                  sleep 5
+                  kill -KILL "$GOONDVR_PID" 2>/dev/null || true
+                else
+                  # Fallback: escape special chars and use exact match
+                  SAFE_USER=$(printf '%s\n' "$USERNAME" | sed 's/[.[\*^$]/\\&/g')
+                  pkill -TERM -f "goondvr.*-u ${SAFE_USER} " || true
+                  sleep 5
+                  pkill -KILL -f "goondvr.*-u ${SAFE_USER} " || true
+                fi
+                break
               fi
 
+              # Check if goondvr process is still running
+              if [[ -f "$GOONDVR_PID_FILE" ]]; then
+                GOONDVR_PID=$(cat "$GOONDVR_PID_FILE" 2>/dev/null)
+                if ! kill -0 "$GOONDVR_PID" 2>/dev/null; then
+                  echo "ℹ️  [MONITOR] goondvr process ended naturally"
+                  break
+                fi
+              fi
+
+              # Check for stalled streams (no file growth AND no new files)
               if [[ "$FCOUNT" -gt 0 ]]; then
-                if [[ "$CURR" -gt "$PREV_SIZE" ]]; then
-                  STALE=0
+                # Stream is healthy if EITHER size grows OR new files appear
+                if [[ "$CURR" -gt "$PREV_SIZE" ]] || [[ "$FCOUNT" -gt "$LAST_FILE_COUNT" ]]; then
+                  STALE=0  # Reset counter - stream is healthy
                 else
                   STALE=$(( STALE + 1 ))
-                  echo "⚠️  [MONITOR] No file growth detected ($STALE/$MAX_STALE)"
+                  echo "⚠️  [MONITOR] No file growth detected ($STALE/$MAX_STALE min)"
                   if [[ "$STALE" -ge "$MAX_STALE" ]]; then
-                    echo "🛑 [MONITOR] Stream stalled — cleanly stopping goondvr"
-                    pkill -f goondvr || true; break
+                    echo "🛑 [MONITOR] Stream stalled for ${STALE} minutes — stopping"
+                    echo "1" > "$MONITOR_FLAG"  # Signal that monitor killed it
+                    
+                    # Kill using PID file
+                    if [[ -f "$GOONDVR_PID_FILE" ]]; then
+                      GOONDVR_PID=$(cat "$GOONDVR_PID_FILE" 2>/dev/null)
+                      kill -TERM "$GOONDVR_PID" 2>/dev/null || true
+                      sleep 5
+                      kill -KILL "$GOONDVR_PID" 2>/dev/null || true
+                    else
+                      SAFE_USER=$(printf '%s\n' "$USERNAME" | sed 's/[.[\*^$]/\\&/g')
+                      pkill -TERM -f "goondvr.*-u ${SAFE_USER} " || true
+                      sleep 5
+                      pkill -KILL -f "goondvr.*-u ${SAFE_USER} " || true
+                    fi
+                    break
                   fi
                 fi
                 PREV_SIZE=$CURR
+                LAST_FILE_COUNT=$FCOUNT
               fi
             done
           ) &
@@ -429,8 +510,24 @@ jobs:
             VSIZE_BEFORE=$(du -sb videos 2>/dev/null | cut -f1 || echo 0)
 
             RC=0
+            # Timeout ensures we break for upload even if stream continues
+            # Check monitor flag to avoid double-kill race condition
             timeout --kill-after=60 $(( MAX_DURATION + 2 ))m \
-              ./goondvr "${ARGS[@]}" || RC=$?
+              ./goondvr "${ARGS[@]}" &
+            
+            # Store PID for monitor to use
+            GOONDVR_PID=$!
+            echo "$GOONDVR_PID" > "$GOONDVR_PID_FILE"
+            
+            # Wait for goondvr to finish
+            wait "$GOONDVR_PID" || RC=$?
+            
+            # Check if monitor killed it (flag=1) or timeout killed it (RC=124)
+            MONITOR_KILLED=$(cat "$MONITOR_FLAG" 2>/dev/null || echo "0")
+            if [[ "$MONITOR_KILLED" == "1" ]]; then
+              echo "  (killed by monitor, not timeout)"
+              RC=143  # SIGTERM exit code
+            fi
 
             VCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
             VSIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo 0)
@@ -478,9 +575,10 @@ jobs:
             sleep $(( INTERVAL * 60 ))
           done
 
-          # Clean up monitor
+          # Clean up monitor, flag file, and PID file
           kill -TERM "$MONITOR_PID" 2>/dev/null || true
           wait  "$MONITOR_PID" 2>/dev/null || true
+          rm -f "$MONITOR_FLAG" "$GOONDVR_PID_FILE" 2>/dev/null || true
 
           # ── Summary ───────────────────────────────────────────────────
           TOTAL=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
@@ -552,9 +650,17 @@ jobs:
                 -f mp4 \
                 "$OUT" 2>&1; then
               
+              # Verify output is valid and playable
               if [[ -f "$OUT" ]] && [[ $(stat -c%s "$OUT" 2>/dev/null || echo 0) -gt 1000 ]]; then
-                echo "  ✓ Converted ($(du -h "$OUT" | cut -f1))"
-                rm -f "$f"
+                # Use ffprobe to verify the file is actually valid
+                if ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$OUT" >/dev/null 2>&1; then
+                  echo "  ✓ Converted and verified ($(du -h "$OUT" | cut -f1))"
+                  rm -f "$f"
+                else
+                  echo "  ✗ Output corrupt — keeping .ts"
+                  rm -f "$OUT"
+                  cp "$f" "videos/mp4/${BASE}.ts"
+                fi
               else
                 echo "  ✗ Output invalid — keeping .ts"
                 rm -f "$OUT"
@@ -678,7 +784,17 @@ jobs:
               SERVER=$(curl -sf --max-time 10 https://api.gofile.io/servers \
                 | jq -r '.data.servers[0].name // "store1"' 2>/dev/null || echo "$SERVER")
 
-              UL_TIMEOUT=$(awk "BEGIN{t=int($FSIZE/1048576/2)+30; print (t>180)?180:t}")
+              # Dynamic timeout based on file size
+              # Assume minimum 0.5 MB/s upload speed (slow connection)
+              # Add 60s overhead for API processing
+              UL_TIMEOUT=$(awk -v size="$FSIZE" 'BEGIN{
+                t = int(size/524288) + 60;
+                if (t < 5) t = 5;        # Minimum 5 minutes
+                if (t > 360) t = 360;    # Maximum 6 hours
+                print int(t)
+              }')
+              
+              echo "  Upload timeout: ${UL_TIMEOUT} minutes"
               START=$(date +%s)
 
               RESP=$(timeout ${UL_TIMEOUT}m curl -sf -X POST \
@@ -841,14 +957,36 @@ jobs:
 
               if [[ -f "$DEST" ]]; then
                 # Merge: combine recordings arrays, deduplicate by .id
+                # Use file locking to prevent race conditions
+                LOCK_FILE="$DEST.lock"
+                
                 echo "  Merging with existing file..."
-                jq -s '
-                  .[0] as $a | .[1] as $b |
-                  $a | .recordings = ([$a.recordings[], $b.recordings[]] | unique_by(.id)) |
-                  .summary.total_recordings = (.recordings|length) |
-                  .summary.total_size_bytes  = ([.recordings[].filesize_bytes]|add//0)
-                ' "$DEST" "$REC_FILE" > "$DEST.tmp" && mv "$DEST.tmp" "$DEST"
-                echo "  ✓ Merged"
+                
+                # Use flock with proper FD management
+                # Lock is held for entire merge operation, released automatically
+                {
+                  if ! flock -w 30 200; then
+                    echo "  ⚠️  Could not acquire lock after 30s, skipping merge"
+                    exit 0
+                  fi
+                  
+                  # Merge while lock is held
+                  jq -s '
+                    .[0] as $a | .[1] as $b |
+                    $a | .recordings = ([$a.recordings[], $b.recordings[]] | unique_by(.id)) |
+                    .summary.total_recordings = (.recordings|length) |
+                    .summary.total_size_bytes  = ([.recordings[].filesize_bytes]|add//0)
+                  ' "$DEST" "$REC_FILE" > "$DEST.tmp"
+                  
+                  # Atomic move while lock is still held
+                  mv "$DEST.tmp" "$DEST"
+                  echo "  ✓ Merged"
+                  
+                  # Lock automatically released when FD 200 closes
+                } 200>"$LOCK_FILE"
+                
+                # Clean up lock file (safe even if still locked by another process)
+                rm -f "$LOCK_FILE" 2>/dev/null || true
               else
                 echo "  Creating new file..."
                 cp "$REC_FILE" "$DEST"
@@ -872,16 +1010,63 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add database/ 2>/dev/null || true
 
+          # Check if there are staged changes
           if git diff --staged --quiet; then
             echo "⚠️  No database changes to commit."
           else
             echo "::group::Committing changes"
             git status --short
-            git commit -m "chore: update recording database [skip ci]"
-            # Pull rebase in case another run pushed concurrently
-            git pull --rebase origin "${{ github.ref_name || 'main' }}" || true
-            git push origin "${{ github.ref_name || 'main' }}"
-            echo "✓ Database committed to GitHub"
+            
+            # Retry loop for git push with conflict resolution
+            MAX_RETRIES=5
+            SUCCESS=false
+            
+            for RETRY in $(seq 1 $MAX_RETRIES); do
+              if [[ "$RETRY" -gt 1 ]]; then
+                echo "  Retry $RETRY/$MAX_RETRIES after conflict..."
+                sleep $(( RETRY * 5 ))
+              fi
+              
+              # Check if we already have a commit
+              if git log -1 --pretty=%B 2>/dev/null | grep -q "update recording database"; then
+                echo "  Using existing commit"
+              else
+                # Create commit
+                if ! git commit -m "chore: update recording database [skip ci]"; then
+                  echo "  ⚠️  Commit failed, nothing to commit?"
+                  break
+                fi
+              fi
+              
+              # Pull with timeout and rebase
+              if timeout 60 git pull --rebase origin "${{ github.ref_name || 'main' }}"; then
+                # Push with timeout
+                if timeout 60 git push origin "${{ github.ref_name || 'main' }}"; then
+                  echo "✓ Database committed to GitHub"
+                  SUCCESS=true
+                  break
+                else
+                  echo "  ⚠️  Push failed, will retry..."
+                fi
+              else
+                echo "  ⚠️  Pull/rebase failed, resolving..."
+                # Abort failed rebase
+                git rebase --abort 2>/dev/null || true
+              fi
+              
+              # Reset for next attempt
+              git reset --soft HEAD~1 2>/dev/null || true
+              
+              # Fetch latest changes
+              timeout 30 git fetch origin "${{ github.ref_name || 'main' }}" 2>/dev/null || true
+            done
+            
+            if [[ "$SUCCESS" == "false" ]]; then
+              echo "::warning::Failed to push database after $MAX_RETRIES attempts"
+              echo "::warning::Database updates will be retried in next workflow run"
+              # Don't fail the job - let it continue
+            fi
+            
             echo "::endgroup::"
           fi
 
