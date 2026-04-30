@@ -10,7 +10,7 @@ DISK_USAGE=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
 echo "📊 Current disk usage: ${DISK_USAGE}%"
 echo ""
 
-# 1. Clean Docker build cache (ALWAYS - no time filter)
+# 1. Clean Docker build cache (ALWAYS - ALL cache)
 echo "🗑️  Cleaning ALL Docker build cache..."
 CACHE_BEFORE=$(sudo docker system df | grep "Build Cache" | awk '{print $4}')
 sudo docker builder prune -af
@@ -18,9 +18,9 @@ CACHE_AFTER=$(sudo docker system df | grep "Build Cache" | awk '{print $4}')
 echo "   Before: $CACHE_BEFORE → After: $CACHE_AFTER"
 echo ""
 
-# 2. Remove unused Docker images
-echo "🗑️  Removing unused Docker images..."
-sudo docker image prune -af --filter "until=72h"
+# 2. Remove ALL unused Docker images (keep only running containers)
+echo "🗑️  Removing ALL unused Docker images..."
+sudo docker image prune -af
 echo ""
 
 # 3. Remove unused volumes

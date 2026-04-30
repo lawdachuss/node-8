@@ -127,11 +127,34 @@ jobs:
             fi
             
             echo ""
-            echo "🧹 Cleaning Docker build cache..."
+            echo "🧹 Aggressive cache cleanup..."
+            
+            # Clean ALL Docker build cache
+            echo "  → Cleaning build cache..."
             sudo docker builder prune -af
             
+            # Clean unused images (keep running ones)
+            echo "  → Cleaning unused images..."
+            sudo docker image prune -af
+            
+            # Clean unused volumes
+            echo "  → Cleaning unused volumes..."
+            sudo docker volume prune -f
+            
+            # Clean system cache
+            echo "  → Cleaning system cache..."
+            sudo docker system prune -af --volumes
+            
+            # Clean apt cache
+            echo "  → Cleaning apt cache..."
+            sudo apt-get clean 2>/dev/null || true
+            
+            # Clean old logs
+            echo "  → Cleaning old logs..."
+            sudo journalctl --vacuum-time=3d 2>/dev/null || true
+            
             echo ""
-            echo "✅ Deployment complete!"
+            echo "✅ Deployment and cleanup complete!"
           ENDSSH
 
       - name: Verify deployment
