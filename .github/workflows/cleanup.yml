@@ -1,10 +1,10 @@
 name: Cleanup EC2 Disk
 
 on:
-  schedule:
-    # Run daily at 3 AM UTC
-    - cron: '0 3 * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger only (requires secrets setup)
+  # Uncomment below to enable daily automatic cleanup:
+  # schedule:
+  #   - cron: '0 3 * * *'  # Daily at 3 AM UTC
 
 jobs:
   cleanup:
@@ -12,6 +12,19 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: Check secrets
+        run: |
+          if [ -z "${{ secrets.EC2_SSH_KEY }}" ] || [ -z "${{ secrets.EC2_HOST }}" ]; then
+            echo "❌ ERROR: GitHub secrets not configured!"
+            echo ""
+            echo "Please add these secrets to your repository:"
+            echo "1. EC2_SSH_KEY - Your EC2 private key"
+            echo "2. EC2_HOST - Your EC2 IP address (e.g., 32.193.245.111)"
+            echo ""
+            echo "See .github/GITHUB_ACTIONS_SETUP.md for instructions"
+            exit 1
+          fi
+
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
