@@ -10,10 +10,10 @@ DISK_USAGE=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
 echo "📊 Current disk usage: ${DISK_USAGE}%"
 echo ""
 
-# 1. Clean Docker build cache
-echo "🗑️  Cleaning Docker build cache..."
+# 1. Clean Docker build cache (ALWAYS - no time filter)
+echo "🗑️  Cleaning ALL Docker build cache..."
 CACHE_BEFORE=$(sudo docker system df | grep "Build Cache" | awk '{print $4}')
-sudo docker builder prune -af --filter "until=24h"
+sudo docker builder prune -af
 CACHE_AFTER=$(sudo docker system df | grep "Build Cache" | awk '{print $4}')
 echo "   Before: $CACHE_BEFORE → After: $CACHE_AFTER"
 echo ""

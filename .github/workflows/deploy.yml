@@ -1,0 +1,68 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to AWS EC2
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2-key.pem
+          chmod 600 ~/.ssh/ec2-key.pem
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        run: |
+          ssh -i ~/.ssh/ec2-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            cd /home/ubuntu/goondvr
+            
+            echo "📥 Pulling latest changes..."
+            git fetch origin
+            git reset --hard origin/main
+            git pull origin main
+            
+            echo "🐳 Rebuilding containers..."
+            sudo docker compose down
+            sudo docker compose up -d --build
+            
+            echo "🧹 Cleaning build cache..."
+            sudo docker builder prune -af
+            
+            echo "✅ Deployment complete!"
+            sudo docker compose ps
+          EOF
+
+      - name: Verify deployment
+        run: |
+          echo "⏳ Waiting for services to be healthy..."
+          sleep 30
+          
+          ssh -i ~/.ssh/ec2-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            cd /home/ubuntu/goondvr
+            
+            echo "📊 Container Status:"
+            sudo docker compose ps
+            
+            echo ""
+            echo "💾 Disk Usage:"
+            df -h /
+            
+            echo ""
+            echo "🐳 Docker Usage:"
+            sudo docker system df
+          EOF
+
+      - name: Cleanup SSH
+        if: always()
+        run: rm -f ~/.ssh/ec2-key.pem

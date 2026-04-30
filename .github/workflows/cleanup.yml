@@ -1,0 +1,53 @@
+name: Cleanup EC2 Disk
+
+on:
+  schedule:
+    # Run daily at 3 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    name: Clean EC2 Disk Space
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2-key.pem
+          chmod 600 ~/.ssh/ec2-key.pem
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Run cleanup script
+        run: |
+          ssh -i ~/.ssh/ec2-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            cd /home/ubuntu/goondvr
+            
+            echo "🧹 Running disk cleanup..."
+            ./scripts/cleanup-disk.sh
+            
+            echo ""
+            echo "📊 Final Status:"
+            df -h /
+            sudo docker system df
+          EOF
+
+      - name: Check disk usage
+        run: |
+          ssh -i ~/.ssh/ec2-key.pem ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            DISK_USAGE=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
+            
+            if [ $DISK_USAGE -gt 85 ]; then
+              echo "⚠️ WARNING: Disk usage is ${DISK_USAGE}% (> 85%)"
+              exit 1
+            elif [ $DISK_USAGE -gt 75 ]; then
+              echo "⚠️ CAUTION: Disk usage is ${DISK_USAGE}% (> 75%)"
+            else
+              echo "✅ Disk usage is healthy: ${DISK_USAGE}%"
+            fi
+          EOF
+
+      - name: Cleanup SSH
+        if: always()
+        run: rm -f ~/.ssh/ec2-key.pem
