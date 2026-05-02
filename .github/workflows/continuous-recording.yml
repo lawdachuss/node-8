@@ -27,20 +27,17 @@ jobs:
       
       - name: Create required directories
         run: |
-          mkdir -p videos/completed
-          mkdir -p database
-          mkdir -p conf
-          
-          echo "💾 Initial disk space:"
+          mkdir -p videos/completed database conf
+          echo "[INFO] Initial disk space:"
           df -h /
       
       - name: Create settings.json from secrets
         env:
           SETTINGS_CONTENT: ${{ secrets.SETTINGS_JSON }}
         run: |
-          echo "📋 Creating settings.json..."
+          echo "[INFO] Creating settings.json from secrets"
           if [ -z "$SETTINGS_CONTENT" ]; then
-            echo "❌ SETTINGS_JSON secret not found!"
+            echo "[ERROR] SETTINGS_JSON secret not found"
             echo ""
             echo "Please add SETTINGS_JSON secret in GitHub repository settings:"
             echo "1. Go to: https://github.com/${{ github.repository }}/settings/secrets/actions"
@@ -52,22 +49,22 @@ jobs:
           fi
           
           echo "$SETTINGS_CONTENT" > settings.json
-          echo "✅ settings.json created from secret"
+          echo "[SUCCESS] settings.json created"
       
       - name: Create channels.json from secrets (if exists)
         env:
           CHANNELS_CONTENT: ${{ secrets.CHANNELS_JSON }}
         run: |
-          echo "📋 Creating channels.json..."
+          echo "[INFO] Creating channels.json"
           if [ -z "$CHANNELS_CONTENT" ]; then
-            echo "⚠️ CHANNELS_JSON secret not found"
-            echo "Creating empty channels file - you can add channels via Web UI"
+            echo "[WARN] CHANNELS_JSON secret not found - creating empty file"
             echo "[]" > conf/channels.json
           else
             echo "$CHANNELS_CONTENT" > conf/channels.json
-            echo "✅ channels.json created from secret"
-            echo "📊 Channel count: $(jq '. | length' conf/channels.json)"
-            echo "📺 Active channels: $(jq '[.[] | select(.is_paused == false)] | length' conf/channels.json)"
+            echo "[SUCCESS] channels.json created"
+            TOTAL=$(jq '. | length' conf/channels.json)
+            ACTIVE=$(jq '[.[] | select(.is_paused == false)] | length' conf/channels.json)
+            echo "[INFO] Total channels: $TOTAL, Active: $ACTIVE"
           fi
       
       - name: Set up Docker Buildx
@@ -156,7 +153,7 @@ jobs:
       
       - name: Build Docker image
         run: |
-          echo "🐳 Building Docker image..."
+          echo "[INFO] Building Docker image"
           docker build -t goondvr:latest .
       
       - name: Install Cloudflare Tunnel
@@ -458,3 +455,4 @@ jobs:
           echo "✅ Workflow completed"
           echo "🔄 Next run will start automatically in ~5 hours"
           echo "🌐 A new dashboard URL will be generated on next run"
+
