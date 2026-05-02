@@ -38,9 +38,9 @@ jobs:
         run: |
           echo "📋 Creating settings.json..."
           if [ -n "${{ secrets.SETTINGS_JSON }}" ]; then
-            cat > settings.json << 'EOF'
+            cat > settings.json <<'SETTINGSEOF'
           ${{ secrets.SETTINGS_JSON }}
-          EOF
+          SETTINGSEOF
             echo "✅ settings.json created from secret"
           else
             echo "❌ SETTINGS_JSON secret not found!"
@@ -58,9 +58,9 @@ jobs:
         run: |
           echo "📋 Creating channels.json..."
           if [ -n "${{ secrets.CHANNELS_JSON }}" ]; then
-            cat > conf/channels.json << 'EOF'
+            cat > conf/channels.json <<'CHANNELSEOF'
           ${{ secrets.CHANNELS_JSON }}
-          EOF
+          CHANNELSEOF
             echo "✅ channels.json created from secret"
             echo "📊 Channel count: $(jq '. | length' conf/channels.json)"
             echo "📺 Active channels: $(jq '[.[] | select(.is_paused == false)] | length' conf/channels.json)"
