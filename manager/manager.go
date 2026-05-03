@@ -275,6 +275,12 @@ func LoadSettings() error {
 	log.Println("[SETTINGS] ✓ loaded from local file")
 	applySettings(s)
 
+	// If Supabase client isn't initialized yet, but we just loaded credentials from the file,
+	// initialize it now so we can auto-migrate the rest of the settings to the cloud.
+	if server.SupabaseClient == nil && server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
+		server.InitSupabase()
+	}
+
 	// Auto-migrate local settings to Supabase if client is available
 	if server.SupabaseClient != nil {
 		log.Println("[SETTINGS] migrating local settings to Supabase...")
