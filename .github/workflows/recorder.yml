@@ -2,164 +2,144 @@ name: 24/7 Recorder
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Every hour (ensures continuous coverage)
+    - cron: '0 * * * *'  # Fallback safety net only
   workflow_dispatch:
   push:
     branches: [ main, master ]
 
+# Prevent overlapping runs — queue, don't cancel
+concurrency:
+  group: recorder
+  cancel-in-progress: false
+
+permissions:
+  actions: write   # Required for self-triggering
+  contents: read
+
 jobs:
-  # Main recording job
   record:
     runs-on: ubuntu-latest
-    timeout-minutes: 300  # 5 hours
-    
+    timeout-minutes: 360  # 6h — gives 1h buffer after 5h recording
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Create directories
         run: |
-          mkdir -p videos/completed database conf
-          echo "[INFO] Initial disk space:"
-          df -h /
-      
+          mkdir -p videos/completed database conf emergency-backup
+          echo "[INFO] Disk space:"; df -h /
+
       - name: Verify Supabase credentials
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
         run: |
-          echo "[INFO] Checking Supabase credentials..."
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_API_KEY" ]; then
-            echo "[ERROR] Supabase credentials not configured"
-            echo "Please add SUPABASE_URL and SUPABASE_API_KEY secrets"
-            exit 1
+            echo "[ERROR] Supabase credentials not configured"; exit 1
           fi
           echo "[SUCCESS] Supabase credentials found"
-      
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
+
       - name: Start Byparr (Cloudflare bypass)
         continue-on-error: true
         run: |
-          echo "🔧 Starting Byparr..."
           docker network create recorder-network 2>/dev/null || true
           docker pull ghcr.io/thephaseless/byparr:latest || exit 0
           docker run -d --name byparr --network recorder-network -p 8191:8191 \
             -e HOST=0.0.0.0 -e PORT=8191 -e TIMEOUT=180 -e LOG_LEVEL=INFO \
             ghcr.io/thephaseless/byparr:latest
           sleep 30
-          echo "✅ Byparr ready"
-      
+
       - name: Build and start recorder
         run: |
           docker build -t goondvr:latest .
-          
+
           BYPARR_URL=""
-          if docker ps 2>/dev/null | grep -q byparr; then
-            BYPARR_URL="http://byparr:8191/v1"
-          fi
-          
-          if [ -n "$BYPARR_URL" ]; then
-            docker run -d --name goondvr --network recorder-network -p 8080:8080 \
-              -e FLARESOLVERR_URL="$BYPARR_URL" \
-              -e SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-              -e SUPABASE_API_KEY="${{ secrets.SUPABASE_API_KEY }}" \
-              -v $(pwd)/videos:/usr/src/app/videos \
-              goondvr:latest --port 8080 --enable-gofile-upload --debug
-          else
-            docker run -d --name goondvr --network recorder-network -p 8080:8080 \
-              -e SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-              -e SUPABASE_API_KEY="${{ secrets.SUPABASE_API_KEY }}" \
-              -v $(pwd)/videos:/usr/src/app/videos \
-              goondvr:latest --port 8080 --enable-gofile-upload --debug
-          fi
-          
+          docker ps | grep -q byparr && BYPARR_URL="http://byparr:8191/v1"
+
+          EXTRA_ARGS=""
+          [ -n "$BYPARR_URL" ] && EXTRA_ARGS="-e FLARESOLVERR_URL=$BYPARR_URL"
+
+          docker run -d --name goondvr --network recorder-network -p 8080:8080 \
+            $EXTRA_ARGS \
+            -e SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+            -e SUPABASE_API_KEY="${{ secrets.SUPABASE_API_KEY }}" \
+            -v $(pwd)/videos:/usr/src/app/videos \
+            goondvr:latest --port 8080 --enable-gofile-upload --debug
+
           sleep 10
           docker logs goondvr 2>&1 | head -50
-      
+
       - name: Install and start Cloudflare Tunnel
         run: |
-          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          curl -L --output cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           echo $! > tunnel.pid
           sleep 10
           TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
-          echo ""
-          echo "╔════════════════════════════════════════════════════════════╗"
-          echo "║                    🌐 WEB UI ACCESS                        ║"
-          echo "╚════════════════════════════════════════════════════════════╝"
-          echo ""
-          echo "   $TUNNEL_URL"
-          echo ""
-      
+          echo ""; echo "🌐 Web UI: $TUNNEL_URL"; echo ""
+
       - name: Record for 5 hours
         run: |
-          echo "🔄 Recording session started..."
-          
-          # Graceful shutdown handler
           graceful_shutdown() {
-            echo ""
-            echo "⚠️  SHUTDOWN DETECTED - Saving recordings..."
+            echo "⚠️  Saving recordings..."
             docker exec goondvr pkill -SIGTERM -f goondvr 2>/dev/null || true
-            sleep 180  # Wait for finalization
-            
-            # Upload completed files
-            COMPLETED_COUNT=$(docker exec goondvr find /usr/src/app/videos/completed -type f \( -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null | wc -l || echo "0")
+            sleep 180
+            COMPLETED_COUNT=$(docker exec goondvr find /usr/src/app/videos/completed \
+              -type f \( -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null | wc -l || echo "0")
             if [ "$COMPLETED_COUNT" -gt 0 ]; then
               echo "📤 Uploading $COMPLETED_COUNT file(s)..."
               curl -s -X POST -m 600 http://localhost:8080/api/upload/completed || true
               sleep 60
             fi
-            
-            # Create backup
-            mkdir -p emergency-backup
             docker cp goondvr:/usr/src/app/videos/. emergency-backup/ 2>/dev/null || true
-            
-            echo "✅ Shutdown complete"
             CANCELLED=true
           }
-          
+
           trap 'graceful_shutdown' SIGTERM SIGINT
           CANCELLED=false
-          
-          # Monitor for 5 hours
-          END_TIME=$(($(date +%s) + 18000))
+
+          END_TIME=$(($(date +%s) + 18000))  # 5 hours
           LAST_CLEANUP=0
-          
+
           while [ $(date +%s) -lt $END_TIME ] && [ "$CANCELLED" = false ]; do
-            CURRENT_TIME=$(date +%s)
-            
-            # Check container health
             if ! docker ps | grep -q goondvr; then
-              echo "⚠️  Container stopped!"
-              docker logs --tail 50 goondvr
-              break
+              echo "⚠️  Container stopped!"; docker logs --tail 50 goondvr; break
             fi
-            
-            # Periodic upload every 30 minutes
+
+            CURRENT_TIME=$(date +%s)
             if [ $((CURRENT_TIME - LAST_CLEANUP)) -gt 1800 ]; then
-              echo "📤 Periodic upload check..."
-              COMPLETED_COUNT=$(docker exec goondvr find /usr/src/app/videos/completed -type f \( -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null | wc -l || echo "0")
-              if [ "$COMPLETED_COUNT" -gt 0 ]; then
+              COMPLETED_COUNT=$(docker exec goondvr find /usr/src/app/videos/completed \
+                -type f \( -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null | wc -l || echo "0")
+              [ "$COMPLETED_COUNT" -gt 0 ] && \
                 curl -s -X POST -m 120 http://localhost:8080/api/upload/completed > /dev/null 2>&1 &
-                sleep 10
-              fi
               LAST_CLEANUP=$CURRENT_TIME
             fi
-            
             sleep 60
           done
-          
+
           # Final upload
-          echo "📤 Final upload..."
-          COMPLETED_COUNT=$(docker exec goondvr find /usr/src/app/videos/completed -type f \( -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null | wc -l || echo "0")
-          if [ "$COMPLETED_COUNT" -gt 0 ]; then
+          COMPLETED_COUNT=$(docker exec goondvr find /usr/src/app/videos/completed \
+            -type f \( -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null | wc -l || echo "0")
+          [ "$COMPLETED_COUNT" -gt 0 ] && \
             curl -s -X POST -m 300 http://localhost:8080/api/upload/completed || true
-            sleep 60
-          fi
-      
+          sleep 60
+
+      # ✅ KEY FIX: Self-trigger next run before cleanup
+      - name: Trigger next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔁 Triggering next 5h run..."
+          gh workflow run "${{ github.workflow }}" --repo "${{ github.repository }}"
+          echo "✅ Next run queued"
+
       - name: Cleanup
         if: always()
         run: |
@@ -169,15 +149,12 @@ jobs:
           docker system prune -af --volumes 2>/dev/null || true
           pkill -f cloudflared 2>/dev/null || true
           rm -rf videos/* database/* 2>/dev/null || true
-          echo "✅ Cleanup complete"
-      
-      - name: Upload artifacts (if any files remain)
+
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: recordings-${{ github.run_number }}
-          path: |
-            emergency-backup/
-            videos/
+          path: emergency-backup/
           retention-days: 30
           if-no-files-found: ignore
