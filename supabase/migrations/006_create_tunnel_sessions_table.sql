@@ -23,6 +23,15 @@ COMMENT ON COLUMN tunnel_sessions.started_at IS 'When the tunnel was first estab
 COMMENT ON COLUMN tunnel_sessions.last_seen_at IS 'Last time the tunnel was verified as active';
 COMMENT ON COLUMN tunnel_sessions.is_active IS 'Whether this tunnel is currently active';
 
+-- Enable Row Level Security
+ALTER TABLE tunnel_sessions ENABLE ROW LEVEL SECURITY;
+
+-- Create policy to allow all operations
+CREATE POLICY "Allow all operations on tunnel_sessions" ON tunnel_sessions
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
 -- Function to mark old tunnels as inactive when a new one starts
 CREATE OR REPLACE FUNCTION mark_old_tunnels_inactive()
 RETURNS TRIGGER AS $$
