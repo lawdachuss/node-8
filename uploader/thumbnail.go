@@ -21,9 +21,10 @@ client *http.Client
 
 // pixhostResponse is the JSON response from the Pixhost.to API
 type pixhostResponse struct {
-Name    string `json:"name"`
-ShowURL string `json:"show_url"`
-ThURL   string `json:"th_url"`
+	Name    string `json:"name"`
+	ShowURL string `json:"show_url"`
+	ThURL   string `json:"th_url"`
+	ImgURL  string `json:"img_url"` // Direct image URL
 }
 
 // NewThumbnailUploader creates a new Pixhost.to thumbnail uploader.
@@ -121,10 +122,14 @@ if err := json.Unmarshal(body, &result); err != nil {
 return "", fmt.Errorf("decode response: %w", err)
 }
 
-// Get the direct image URL from show_url
-imageURL := strings.TrimSpace(result.ShowURL)
+// Prefer direct image URL (img_url), fall back to thumbnail URL (th_url)
+// Do NOT use show_url as it's an HTML page, not an image
+imageURL := strings.TrimSpace(result.ImgURL)
 if imageURL == "" {
-return "", fmt.Errorf("Pixhost returned no image URL")
+imageURL = strings.TrimSpace(result.ThURL)
+}
+if imageURL == "" {
+return "", fmt.Errorf("Pixhost returned no image URL (response: %s)", string(body))
 }
 
 log.Printf("Thumbnail uploaded to Pixhost: %s", imageURL)
