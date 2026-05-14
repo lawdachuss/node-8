@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS channels (
     framerate INTEGER NOT NULL DEFAULT 30,
     resolution INTEGER NOT NULL DEFAULT 1080,
     pattern TEXT NOT NULL,
-    max_duration INTEGER NOT NULL DEFAULT 45,
+    max_duration INTEGER NOT NULL DEFAULT 30,
     max_filesize INTEGER NOT NULL DEFAULT 0,
     created_at BIGINT NOT NULL,
     streamed_at BIGINT,

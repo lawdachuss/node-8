@@ -68,7 +68,7 @@ func main() {
 			&cli.IntFlag{
 				Name:  "max-duration",
 				Usage: "Split video into segments every N minutes ('0' to disable)",
-				Value: 45,
+				Value: 30,
 			},
 			&cli.IntFlag{
 				Name:  "max-filesize",
