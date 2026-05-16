@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -89,6 +90,40 @@ func fetchAPIResponse(ctx context.Context, client *internal.Req, username string
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, string, error) {
 	resp, err := fetchAPIResponse(ctx, client, username)
 	if err != nil {
+		// If Cloudflare blocked us, try FlareSolverr as fallback
+		if errors.Is(err, internal.ErrCloudflareBlocked) {
+			// Check if FLARESOLVERR_URL is configured
+			flaresolverrURL := os.Getenv("FLARESOLVERR_URL")
+			if flaresolverrURL != "" {
+				fmt.Printf("[INFO] Cloudflare blocked, trying FlareSolverr fallback for %s...\n", username)
+				
+				// Try FlareSolverr with extended timeout
+				attemptCtx, cancel := context.WithTimeout(ctx, 250*time.Second)
+				hlsURL, status, scrapeErr := internal.FetchStreamViaFlareSolverr(attemptCtx, username)
+				cancel()
+				
+				if scrapeErr != nil {
+					fmt.Printf("[WARN] FlareSolverr also failed for %s: %v\n", username, scrapeErr)
+					return nil, "", fmt.Errorf("both API and FlareSolverr blocked: %w", err)
+				}
+				
+				// FlareSolverr succeeded
+				fmt.Printf("[SUCCESS] FlareSolverr bypassed Cloudflare for %s\n", username)
+				
+				if status == "offline" || hlsURL == "" {
+					return nil, status, internal.ErrChannelOffline
+				}
+				
+				if status == "private" {
+					return nil, status, internal.ErrPrivateStream
+				}
+				
+				return &Stream{HLSSource: hlsURL}, status, nil
+			}
+			
+			fmt.Printf("[WARN] Cloudflare blocked %s but FLARESOLVERR_URL not configured\n", username)
+		}
+		
 		return nil, "", err
 	}
 

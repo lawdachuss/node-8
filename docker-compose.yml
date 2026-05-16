@@ -54,17 +54,24 @@
     container_name: chaturbate-dvr
     command: ["--port", "8080", "--compress=false"]
     environment:
+      - FLARESOLVERR_URL=http://byparr-lb/v1
       - VOESX_API_KEY=${VOESX_API_KEY:-}
       - STREAMTAPE_LOGIN=${STREAMTAPE_LOGIN:-}
       - STREAMTAPE_API_KEY=${STREAMTAPE_API_KEY:-}
       - SENDCM_API_KEY=${SENDCM_API_KEY:-}
       - BYSE_API_KEY=${BYSE_API_KEY:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_USERNAME=${PROXY_USERNAME:-}
+      - PROXY_PASSWORD=${PROXY_PASSWORD:-}
     ports:
       - "8080:8080"
     volumes:
       - ./videos:/usr/src/app/videos
       - ./conf:/usr/src/app/conf
       - ./database:/database
+    depends_on:
+      byparr-lb:
+        condition: service_healthy
     restart: unless-stopped
     stop_grace_period: 5m
     networks:
