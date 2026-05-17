@@ -56,6 +56,10 @@ jobs:
 
           mkdir -p videos conf database emergency-backup
 
+          # .env is required by docker-compose.yml but not in git (secrets)
+          # Secrets are passed via job-level env vars; .env just needs to exist
+          touch .env
+
           # Install jq for JSON parsing
           sudo apt-get update -qq && sudo apt-get install -y -qq jq
 
