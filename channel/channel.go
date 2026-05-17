@@ -29,6 +29,10 @@ type Channel struct {
 	Filesize   int     // Bytes
 	Sequence   int
 
+	RoomTitle string   // captured from API at recording start
+	Tags      []string // captured from API at recording start
+	Viewers   int      // captured from API at recording start
+
 	Logs []string
 
 	File             *os.File
@@ -38,8 +42,8 @@ type Channel struct {
 	InitSegment      []byte // fMP4 video init segment for LL-HLS streams
 	AudioInitSegment []byte // fMP4 audio init segment for LL-HLS streams
 	HasSeparateAudio bool
-	switchRequested  bool // set by HandleSegment, consumed by OnPollComplete
-	cleanupMu sync.Mutex // serialises Cleanup() calls from concurrent goroutines
+	switchRequested  bool       // set by HandleSegment, consumed by OnPollComplete
+	cleanupMu        sync.Mutex // serialises Cleanup() calls from concurrent goroutines
 }
 
 // New creates a new channel instance with the given manager and configuration.

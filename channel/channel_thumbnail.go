@@ -16,6 +16,8 @@ import (
 )
 
 const numSpriteFrames = 10
+const spriteFrameWidth = 960
+const spriteFrameHeight = 540
 
 // generateThumbnail is the channel-scoped wrapper — logs go to the channel log.
 func (ch *Channel) generateThumbnail(videoPath string) {
@@ -55,7 +57,7 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			"-y", "-i", videoPath,
 			"-ss", "00:00:05",
 			"-vframes", "1",
-			"-s", "640x360",
+			"-s", fmt.Sprintf("%dx%d", spriteFrameWidth, spriteFrameHeight),
 			"-q:v", "2",
 			thumbJPG,
 		).Run()
@@ -110,16 +112,15 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 
 		for i := 0; i < numSpriteFrames && allOK; i++ {
 			seek := float64(i) * interval
-			framePath := filepath.Join(tmpDir, fmt.Sprintf("f_%02d.jpg", i))
+			framePath := filepath.Join(tmpDir, fmt.Sprintf("f_%02d.png", i))
 			frameCtx, frameCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			if out, e := exec.CommandContext(frameCtx, "ffmpeg",
 				"-y",
 				"-ss", fmt.Sprintf("%.1f", seek),
 				"-i", videoPath,
 				"-vframes", "1",
-		"-s", "640x360",
-			"-q:v", "2",
-			framePath,
+				"-s", fmt.Sprintf("%dx%d", spriteFrameWidth, spriteFrameHeight),
+				framePath,
 			).CombinedOutput(); e != nil {
 				info("thumb: sprite frame %d/%d failed for %s: %v", i+1, numSpriteFrames, baseName, e)
 				if len(out) > 0 {
@@ -137,12 +138,12 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		if allOK {
 			args := []string{"-y"}
 			for i := 0; i < numSpriteFrames; i++ {
-				args = append(args, "-i", filepath.Join(tmpDir, fmt.Sprintf("f_%02d.jpg", i)))
+				args = append(args, "-i", filepath.Join(tmpDir, fmt.Sprintf("f_%02d.png", i)))
 			}
 			args = append(args,
 				"-filter_complex", fmt.Sprintf("hstack=inputs=%d", numSpriteFrames),
 				"-frames:v", "1",
-				"-q:v", "3",
+				"-q:v", "2",
 				spriteJPG,
 			)
 
@@ -179,5 +180,6 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 				}
 			}
 		}
+		_ = os.RemoveAll(tmpDir)
 	}
 }
