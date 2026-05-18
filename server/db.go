@@ -1,133 +1,106 @@
 package server
 
 import (
-	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"time"
+
+	_ "github.com/lib/pq"
 )
 
-var supabaseClient *supabaseREST
+var db *sql.DB
 
-type supabaseREST struct {
-	url    string
-	apiKey string
-	http   *http.Client
-}
-
-// InitDB initialises the Supabase REST client.
-// Falls back silently if SUPABASE_URL / SUPABASE_API_KEY are not set.
+// InitDB initialises the PostgreSQL connection using DATABASE_URL.
+// Falls back silently if DATABASE_URL is not set.
 func InitDB() error {
-	url := os.Getenv("SUPABASE_URL")
-	key := os.Getenv("SUPABASE_API_KEY")
-	if url == "" || key == "" {
-		fmt.Println(" INFO [db] SUPABASE_URL/SUPABASE_API_KEY not set — persistence will use local files only")
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		fmt.Println(" INFO [db] DATABASE_URL not set — persistence will use local files only")
 		return nil
 	}
 
-	supabaseClient = &supabaseREST{
-		url:    url,
-		apiKey: key,
-		http:   &http.Client{Timeout: 15 * time.Second},
+	conn, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	conn.SetMaxOpenConns(10)
+	conn.SetMaxIdleConns(5)
+	conn.SetConnMaxLifetime(5 * time.Minute)
+
+	if err := conn.Ping(); err != nil {
+		conn.Close()
+		return fmt.Errorf("ping db: %w", err)
 	}
 
-	// Quick connectivity check
-	if err := supabaseClient.ping(); err != nil {
-		supabaseClient = nil
-		return fmt.Errorf("supabase ping: %w", err)
+	db = conn
+
+	// Ensure schema exists
+	if err := migrate(db); err != nil {
+		return fmt.Errorf("migrate: %w", err)
 	}
 
-	fmt.Println(" INFO [db] connected to Supabase — all data will be persisted remotely")
+	fmt.Println(" INFO [db] connected to PostgreSQL — all data will be persisted remotely")
 	return nil
 }
 
-// ping checks that the Supabase REST endpoint is reachable.
-func (s *supabaseREST) ping() error {
-	req, _ := http.NewRequest("GET", s.url+"/rest/v1/channels?select=id&limit=1", nil)
-	s.setHeaders(req)
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return err
+// migrate creates all required tables if they don't already exist.
+func migrate(db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS channels (
+			id SERIAL PRIMARY KEY,
+			username TEXT NOT NULL UNIQUE,
+			site TEXT NOT NULL DEFAULT 'chaturbate',
+			is_paused BOOLEAN NOT NULL DEFAULT false,
+			framerate INTEGER NOT NULL DEFAULT 30,
+			resolution INTEGER NOT NULL DEFAULT 1080,
+			pattern TEXT NOT NULL DEFAULT '',
+			max_duration INTEGER NOT NULL DEFAULT 30,
+			max_filesize INTEGER NOT NULL DEFAULT 0,
+			compress BOOLEAN NOT NULL DEFAULT false,
+			created_at BIGINT NOT NULL DEFAULT 0,
+			streamed_at BIGINT,
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS app_settings (
+			key TEXT PRIMARY KEY,
+			value JSONB NOT NULL DEFAULT '{}',
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS video_uploads (
+			id SERIAL PRIMARY KEY,
+			streamer_name TEXT NOT NULL,
+			filename TEXT,
+			gofile_link TEXT,
+			turboviplay_link TEXT,
+			voesx_link TEXT,
+			streamtape_link TEXT,
+			byse_link TEXT,
+			sendcm_link TEXT,
+			thumbnail_link TEXT,
+			sprite_link TEXT,
+			embed_url TEXT,
+			filesize BIGINT,
+			room_title TEXT,
+			tags JSONB DEFAULT '[]',
+			viewers INTEGER DEFAULT 0,
+			resolution TEXT,
+			framerate INTEGER DEFAULT 0,
+			recorded_at TIMESTAMPTZ,
+			upload_date TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 	}
-	resp.Body.Close()
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			return err
+		}
 	}
-	return nil
-}
-
-func (s *supabaseREST) setHeaders(req *http.Request) {
-	req.Header.Set("apikey", s.apiKey)
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "resolution=merge-duplicates,return=minimal")
-}
-
-func (s *supabaseREST) get(table, query string) ([]byte, error) {
-	req, _ := http.NewRequest("GET", s.url+"/rest/v1/"+table+"?"+query, nil)
-	s.setHeaders(req)
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
-}
-
-func (s *supabaseREST) upsert(table string, body interface{}, onConflict ...string) error {
-	b, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	url := s.url + "/rest/v1/" + table
-	if len(onConflict) > 0 && onConflict[0] != "" {
-		url += "?on_conflict=" + onConflict[0]
-	}
-	req, _ := http.NewRequest("POST", url, bytes.NewReader(b))
-	s.setHeaders(req)
-	req.Header.Set("Prefer", "resolution=merge-duplicates,return=minimal")
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("supabase upsert %s: status %d: %s", table, resp.StatusCode, body)
-	}
-	return nil
-}
-
-func (s *supabaseREST) delete(table, filter string) error {
-	req, _ := http.NewRequest("DELETE", s.url+"/rest/v1/"+table+"?"+filter, nil)
-	s.setHeaders(req)
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
 	return nil
 }
 
 // ─── Channels ────────────────────────────────────────────────────────────────
 
-// supabaseChannel mirrors the `channels` table schema in Supabase.
-type supabaseChannel struct {
-	Username    string `json:"username"`
-	Site        string `json:"site"`
-	IsPaused    bool   `json:"is_paused"`
-	Framerate   int    `json:"framerate"`
-	Resolution  int    `json:"resolution"`
-	Pattern     string `json:"pattern"`
-	MaxDuration int    `json:"max_duration"`
-	MaxFilesize int    `json:"max_filesize"`
-	CreatedAt   int64  `json:"created_at"`
-}
-
-// channelConfig is the shape stored in conf/channels.json.
 type channelConfig struct {
 	IsPaused    bool   `json:"is_paused"`
 	Username    string `json:"username"`
@@ -140,10 +113,9 @@ type channelConfig struct {
 	CreatedAt   int64  `json:"created_at"`
 }
 
-// SaveChannelsToDB upserts the channel list to Supabase.
-// The JSON blob is the same format written to conf/channels.json.
+// SaveChannelsToDB upserts the channel list to PostgreSQL.
 func SaveChannelsToDB(data []byte) error {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
 	var configs []channelConfig
@@ -151,60 +123,61 @@ func SaveChannelsToDB(data []byte) error {
 		return fmt.Errorf("parse channels json: %w", err)
 	}
 
-	// Build the set of usernames to keep, then replace all rows.
-	rows := make([]supabaseChannel, 0, len(configs))
+	if len(configs) == 0 {
+		_, err := db.Exec(`DELETE FROM channels WHERE id >= 0`)
+		return err
+	}
+
 	for _, c := range configs {
-		rows = append(rows, supabaseChannel{
-			Username:    c.Username,
-			Site:        "chaturbate",
-			IsPaused:    c.IsPaused,
-			Framerate:   c.Framerate,
-			Resolution:  c.Resolution,
-			Pattern:     c.Pattern,
-			MaxDuration: c.MaxDuration,
-			MaxFilesize: c.MaxFilesize,
-			CreatedAt:   c.CreatedAt,
-		})
+		_, err := db.Exec(`
+			INSERT INTO channels (username, site, is_paused, framerate, resolution, pattern, max_duration, max_filesize, compress, created_at, updated_at)
+			VALUES ($1, 'chaturbate', $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+			ON CONFLICT (username) DO UPDATE SET
+				is_paused    = EXCLUDED.is_paused,
+				framerate    = EXCLUDED.framerate,
+				resolution   = EXCLUDED.resolution,
+				pattern      = EXCLUDED.pattern,
+				max_duration = EXCLUDED.max_duration,
+				max_filesize = EXCLUDED.max_filesize,
+				compress     = EXCLUDED.compress,
+				updated_at   = NOW()`,
+			c.Username, c.IsPaused, c.Framerate, c.Resolution, c.Pattern,
+			c.MaxDuration, c.MaxFilesize, c.Compress, c.CreatedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert channel %s: %w", c.Username, err)
+		}
 	}
-
-	if len(rows) == 0 {
-		// Delete all channels when the list is empty
-		return supabaseClient.delete("channels", "id=gte.0")
-	}
-
-	return supabaseClient.upsert("channels", rows, "username")
+	return nil
 }
 
-// LoadChannelsFromDB fetches channels from Supabase and returns them as
-// the same JSON format used by conf/channels.json, or nil if unavailable.
+// LoadChannelsFromDB fetches channels from PostgreSQL and returns them as
+// the JSON format used by the app, or nil if unavailable.
 func LoadChannelsFromDB() []byte {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
-	data, err := supabaseClient.get("channels", "select=username,site,is_paused,framerate,resolution,pattern,max_duration,max_filesize,created_at&order=created_at.asc")
+	rows, err := db.Query(`
+		SELECT username, is_paused, framerate, resolution, pattern, max_duration, max_filesize, compress, created_at
+		FROM channels ORDER BY created_at ASC`)
 	if err != nil {
 		fmt.Printf("[WARN] [db] load channels: %v\n", err)
 		return nil
 	}
+	defer rows.Close()
 
-	// Parse Supabase rows back into channelConfig slice
-	var rows []supabaseChannel
-	if err := json.Unmarshal(data, &rows); err != nil || len(rows) == 0 {
-		return nil
+	var configs []channelConfig
+	for rows.Next() {
+		var c channelConfig
+		if err := rows.Scan(&c.Username, &c.IsPaused, &c.Framerate, &c.Resolution,
+			&c.Pattern, &c.MaxDuration, &c.MaxFilesize, &c.Compress, &c.CreatedAt); err != nil {
+			fmt.Printf("[WARN] [db] scan channel: %v\n", err)
+			continue
+		}
+		configs = append(configs, c)
 	}
-
-	configs := make([]channelConfig, 0, len(rows))
-	for _, r := range rows {
-		configs = append(configs, channelConfig{
-			Username:    r.Username,
-			IsPaused:    r.IsPaused,
-			Framerate:   r.Framerate,
-			Resolution:  r.Resolution,
-			Pattern:     r.Pattern,
-			MaxDuration: r.MaxDuration,
-			MaxFilesize: r.MaxFilesize,
-			CreatedAt:   r.CreatedAt,
-		})
+	if len(configs) == 0 {
+		return nil
 	}
 
 	b, err := json.Marshal(configs)
@@ -216,21 +189,18 @@ func LoadChannelsFromDB() []byte {
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
-// supabaseSetting stores a key/value pair in the `app_settings` table.
-// If that table doesn't exist in Supabase the calls are silently ignored.
-type supabaseSetting struct {
-	Key   string          `json:"key"`
-	Value json.RawMessage `json:"value"`
-}
-
-// SaveSettingsToDB upserts the settings JSON blob into app_settings.
+// SaveSettingsToDB upserts a settings JSON blob into app_settings.
 func SaveSettingsToDB(data []byte) error {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
-	row := supabaseSetting{Key: "dvr_settings", Value: json.RawMessage(data)}
-	if err := supabaseClient.upsert("app_settings", row, "key"); err != nil {
-		// app_settings table may not exist — not fatal
+	_, err := db.Exec(`
+		INSERT INTO app_settings (key, value, updated_at)
+		VALUES ('dvr_settings', $1, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+		data,
+	)
+	if err != nil {
 		fmt.Printf("[WARN] [db] save settings: %v\n", err)
 	}
 	return nil
@@ -238,39 +208,22 @@ func SaveSettingsToDB(data []byte) error {
 
 // LoadSettingsFromDB fetches the settings blob from app_settings.
 func LoadSettingsFromDB() []byte {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
-	data, err := supabaseClient.get("app_settings", "select=value&key=eq.dvr_settings&limit=1")
+	var raw []byte
+	err := db.QueryRow(`SELECT value FROM app_settings WHERE key = 'dvr_settings'`).Scan(&raw)
 	if err != nil {
 		return nil
 	}
-	var rows []supabaseSetting
-	if err := json.Unmarshal(data, &rows); err != nil || len(rows) == 0 {
-		return nil
-	}
-	return []byte(rows[0].Value)
+	return raw
 }
 
 // ─── Recordings ──────────────────────────────────────────────────────────────
 
-// supabaseVideoUpload mirrors the `video_uploads` table schema.
-type supabaseVideoUpload struct {
-	ID              int    `json:"id,omitempty"`
-	StreamerName    string `json:"streamer_name"`
-	Filename        string `json:"filename,omitempty"`
-	GofileLink      string `json:"gofile_link,omitempty"`
-	TurboViPlayLink string `json:"turboviplay_link,omitempty"`
-	VoeSXLink       string `json:"voesx_link,omitempty"`
-	StreamtapeLink  string `json:"streamtape_link,omitempty"`
-	ThumbnailLink   string `json:"thumbnail_link,omitempty"`
-	UploadDate      string `json:"upload_date,omitempty"`
-}
-
-// recDBShape is the in-memory recordings DB shape (matches channel_upload.go / videos_handler.go).
 type recDBShape struct {
-	Version  int                        `json:"version"`
-	Channels map[string]*recChanShape   `json:"channels"`
+	Version  int                      `json:"version"`
+	Channels map[string]*recChanShape `json:"channels"`
 }
 
 type recChanShape struct {
@@ -294,163 +247,76 @@ type recEntryShape struct {
 }
 
 func SaveRecordingsJSONToDB(data []byte) error {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
-	row := supabaseSetting{Key: "recordings_db", Value: json.RawMessage(data)}
-	if err := supabaseClient.upsert("app_settings", row, "key"); err != nil {
+	_, err := db.Exec(`
+		INSERT INTO app_settings (key, value, updated_at)
+		VALUES ('recordings_db', $1, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+		data,
+	)
+	if err != nil {
 		return fmt.Errorf("save recordings json: %w", err)
 	}
 	return nil
 }
 
-// SaveRecordingsToDB syncs the recordings JSON blob to Supabase and preserves
-// partial upload links in the video_uploads table for compatibility.
+// SaveRecordingsToDB syncs the recordings JSON blob to PostgreSQL.
 func SaveRecordingsToDB(data []byte) error {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
-	if err := SaveRecordingsJSONToDB(data); err != nil {
-		return err
-	}
-
-	var db recDBShape
-	if err := json.Unmarshal(data, &db); err != nil {
-		return fmt.Errorf("parse recordings json: %w", err)
-	}
-
-	for username, chanData := range db.Channels {
-		for _, rec := range chanData.Recordings {
-			row := supabaseVideoUpload{
-				StreamerName:    username,
-				Filename:        rec.Filename,
-				ThumbnailLink:   rec.ThumbnailURL,
-			}
-			if l, ok := rec.Links["GoFile"]; ok {
-				row.GofileLink = l
-			}
-			if l, ok := rec.Links["TurboViPlay"]; ok {
-				row.TurboViPlayLink = l
-			}
-			if l, ok := rec.Links["VOE.sx"]; ok {
-				row.VoeSXLink = l
-			}
-			if l, ok := rec.Links["VoeSX"]; ok {
-				row.VoeSXLink = l
-			}
-			if l, ok := rec.Links["Streamtape"]; ok {
-				row.StreamtapeLink = l
-			}
-
-			supabaseClient.delete("video_uploads", "filename=eq."+rec.Filename)
-			if err := supabaseClient.upsert("video_uploads", row, "filename"); err != nil {
-				fmt.Printf("[WARN] [db] save recording %s: %v\n", rec.Filename, err)
-			}
-		}
-	}
-	return nil
+	return SaveRecordingsJSONToDB(data)
 }
 
 func LoadRecordingsJSONFromDB() []byte {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
-	data, err := supabaseClient.get("app_settings", "select=value&key=eq.recordings_db&limit=1")
+	var raw []byte
+	err := db.QueryRow(`SELECT value FROM app_settings WHERE key = 'recordings_db'`).Scan(&raw)
 	if err != nil {
-		fmt.Printf("[WARN] [db] load recordings json: %v\n", err)
 		return nil
 	}
-	var rows []supabaseSetting
-	if err := json.Unmarshal(data, &rows); err != nil || len(rows) == 0 {
-		return nil
-	}
-	return []byte(rows[0].Value)
+	return raw
 }
 
-// LoadRecordingsFromDB fetches video_uploads rows and converts them back to
-// the recordings JSON format used by the app.
+// LoadRecordingsFromDB fetches the recordings JSON blob from PostgreSQL.
 func LoadRecordingsFromDB() []byte {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
-	if data := LoadRecordingsJSONFromDB(); data != nil {
-		return data
-	}
-	data, err := supabaseClient.get("video_uploads",
-		"select=streamer_name,filename,gofile_link,turboviplay_link,voesx_link,streamtape_link,thumbnail_link,upload_date&order=upload_date.desc")
-	if err != nil {
-		fmt.Printf("[WARN] [db] load recordings: %v\n", err)
-		return nil
-	}
-
-	var rows []supabaseVideoUpload
-	if err := json.Unmarshal(data, &rows); err != nil || len(rows) == 0 {
-		return nil
-	}
-
-	db := recDBShape{
-		Version:  2,
-		Channels: map[string]*recChanShape{},
-	}
-
-	for _, row := range rows {
-		ch, ok := db.Channels[row.StreamerName]
-		if !ok {
-			ch = &recChanShape{Recordings: []recEntryShape{}}
-			db.Channels[row.StreamerName] = ch
-		}
-		links := map[string]string{}
-		if row.GofileLink != "" {
-			links["GoFile"] = row.GofileLink
-		}
-		if row.TurboViPlayLink != "" {
-			links["TurboViPlay"] = row.TurboViPlayLink
-		}
-		if row.VoeSXLink != "" {
-			links["VOE.sx"] = row.VoeSXLink
-		}
-		if row.StreamtapeLink != "" {
-			links["Streamtape"] = row.StreamtapeLink
-		}
-		ch.Recordings = append(ch.Recordings, recEntryShape{
-			Filename:     row.Filename,
-			Timestamp:    row.UploadDate,
-			Links:        links,
-			ThumbnailURL: row.ThumbnailLink,
-			Tags:         []string{},
-		})
-	}
-
-	b, _ := json.Marshal(db)
-	return b
+	return LoadRecordingsJSONFromDB()
 }
 
 // ─── Tunnels ──────────────────────────────────────────────────────────────────
 
-type supabaseTunnel struct {
-	URL   string `json:"url"`
-	RunID int    `json:"run_id"`
-}
-
 func SaveTunnelToDB(url string, runID int) error {
-	if supabaseClient == nil {
+	if db == nil {
 		return nil
 	}
-	row := supabaseTunnel{URL: url, RunID: runID}
-	return supabaseClient.upsert("tunnel_sessions", row, "run_id")
+	_, err := db.Exec(`
+		INSERT INTO app_settings (key, value, updated_at)
+		VALUES ('tunnel_url', $1, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+		fmt.Sprintf(`"%s"`, url),
+	)
+	return err
 }
 
 func LoadCurrentTunnel() (string, error) {
-	if supabaseClient == nil {
+	if db == nil {
 		return "", nil
 	}
-	data, err := supabaseClient.get("tunnel_sessions", "select=url,run_id&order=run_id.desc&limit=1")
+	var raw []byte
+	err := db.QueryRow(`SELECT value FROM app_settings WHERE key = 'tunnel_url'`).Scan(&raw)
 	if err != nil {
-		return "", err
-	}
-	var rows []supabaseTunnel
-	if err := json.Unmarshal(data, &rows); err != nil || len(rows) == 0 {
 		return "", nil
 	}
-	return rows[0].URL, nil
+	var tunnelURL string
+	if err := json.Unmarshal(raw, &tunnelURL); err != nil {
+		return "", nil
+	}
+	return tunnelURL, nil
 }
