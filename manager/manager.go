@@ -141,11 +141,12 @@ func (m *Manager) LoadConfig() error {
 		seq++
 	}
 
-	// Save the updated config to persist the resumed state
-	// Only save when channels were actually loaded to prevent overwriting
-	// the file with an empty config.
+	// Save the updated config to persist the resumed state.
+	// This is best-effort — if Supabase is down, the web UI should still start
+	// and channels will save their state on the next config change.
 	if err := m.SaveConfig(); err != nil {
-		return fmt.Errorf("save config after auto-resume: %w", err)
+		fmt.Printf("[WARN] could not persist channel state to Supabase: %v\n", err)
+		fmt.Println("[WARN] channels are running but state changes will be lost if the container restarts")
 	}
 
 	// Generate thumbnails for any existing videos that don't have one yet

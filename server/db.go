@@ -40,6 +40,7 @@ func supabaseRequest(method, path string, body []byte) (*http.Response, error) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Prefer", "resolution=merge-duplicates")
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	return client.Do(req)
