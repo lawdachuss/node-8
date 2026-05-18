@@ -191,17 +191,16 @@ func GetFreshCookiesViaFlareSolverr(ctx context.Context, url string) (string, st
                 return "", "", fmt.Errorf("parse byparr response: %w (body: %s)", err, bodyPreview)
         }
 
-        // Clean up the session
-        defer func() {
-                destroyReq := flareSolverrRequest{
-                        Cmd:     "sessions.destroy",
-                        Session: sessionID,
-                }
-                destroyData, _ := json.Marshal(destroyReq)
-                destroyHttpReq, _ := http.NewRequest("POST", flaresolverrURL, bytes.NewBuffer(destroyData))
-                destroyHttpReq.Header.Set("Content-Type", "application/json")
-                client.Do(destroyHttpReq)
-        }()
+	// Clean up the session
+	destroyReq := flareSolverrRequest{
+		Cmd:     "sessions.destroy",
+		Session: sessionID,
+	}
+	destroyData, _ := json.Marshal(destroyReq)
+	destroyHttpReq, _ := http.NewRequestWithContext(ctx, "POST", flaresolverrURL, bytes.NewBuffer(destroyData))
+	destroyHttpReq.Header.Set("Content-Type", "application/json")
+	destroyClient := &http.Client{Timeout: 10 * time.Second}
+	destroyClient.Do(destroyHttpReq)
 
         if fsResp.Status != "ok" {
                 // Check for specific error patterns
@@ -258,16 +257,13 @@ func FetchStreamViaFlareSolverr(ctx context.Context, username string, roomInfo *
                 return "", "", fmt.Errorf("get fresh cookies: %w", err)
         }
 
-        // Step 2: Update server config with fresh cookies and user agent, then persist
-        if cookies != "" {
-                server.Config.Cookies = cookies
-        }
-        if userAgent != "" {
-                server.Config.UserAgent = userAgent
-        }
-        if err := server.SaveSettings(); err != nil {
-                fmt.Printf("[WARN] could not persist byparr cookies: %v\n", err)
-        }
+	// Step 2: Update server config with fresh cookies and user agent, then persist
+	if cookies != "" || userAgent != "" {
+		server.UpdateByparrCredentials(cookies, userAgent)
+	}
+	if err := server.SaveSettings(); err != nil {
+		fmt.Printf("[WARN] could not persist byparr cookies: %v\n", err)
+	}
 
         // Step 3: POST API with Byparr cookies (csrftoken must match cookie header).
         body, err := PostChaturbateAPI(ctx, username, "")

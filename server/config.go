@@ -3,11 +3,13 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/teacat/chaturbate-dvr/entity"
 )
 
 var Config *entity.Config
+var configMu sync.RWMutex
 
 type persistedSettings struct {
 	Cookies   string `json:"cookies"`
@@ -15,23 +17,50 @@ type persistedSettings struct {
 	ByparrURL string `json:"byparr_url"`
 }
 
-// SaveSettings writes the runtime cookies and user-agent to Supabase.
+// SaveSettings writes the runtime cookies and user-agent to Supabase
+// and to a local JSON file as fallback.
 func SaveSettings() error {
+	configMu.RLock()
 	s := persistedSettings{
 		Cookies:   Config.Cookies,
 		UserAgent: Config.UserAgent,
 		ByparrURL: Config.ByparrURL,
 	}
+	configMu.RUnlock()
+
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
-	return SaveSettingsToDB(b)
+
+	// Write to local file (best-effort)
+	if err := WriteDataFile("settings.json", b); err != nil {
+		fmt.Printf("[WARN] could not save settings to local file: %v\n", err)
+	}
+
+	// Write to Supabase (best-effort)
+	if err := SaveSettingsToDB(b); err != nil {
+		fmt.Printf("[WARN] could not save settings to Supabase: %v\n", err)
+	}
+
+	return nil
 }
 
-// LoadSettings reads persisted cookies and user-agent from Supabase.
+// LoadSettings reads persisted cookies and user-agent from Supabase first,
+// then falls back to the local JSON file.
 func LoadSettings() error {
-	b := LoadSettingsFromDB()
+	var b []byte
+
+	// Try Supabase first
+	if dbData := LoadSettingsFromDB(); dbData != nil {
+		b = dbData
+	}
+
+	// Fall back to local file
+	if b == nil {
+		b = ReadDataFile("settings.json")
+	}
+
 	if b == nil {
 		return nil
 	}
@@ -40,14 +69,31 @@ func LoadSettings() error {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return fmt.Errorf("unmarshal settings: %w", err)
 	}
-	if Config.Cookies == "" && s.Cookies != "" {
+
+	configMu.Lock()
+	if s.Cookies != "" {
 		Config.Cookies = s.Cookies
 	}
-	if Config.UserAgent == "" && s.UserAgent != "" {
+	if s.UserAgent != "" {
 		Config.UserAgent = s.UserAgent
 	}
-	if Config.ByparrURL == "" && s.ByparrURL != "" {
+	if s.ByparrURL != "" {
 		Config.ByparrURL = s.ByparrURL
 	}
+	configMu.Unlock()
+
 	return nil
+}
+
+// UpdateByparrCredentials safely updates cookies and user-agent
+// with mutex protection for concurrent access.
+func UpdateByparrCredentials(cookies, userAgent string) {
+	configMu.Lock()
+	if cookies != "" {
+		Config.Cookies = cookies
+	}
+	if userAgent != "" {
+		Config.UserAgent = userAgent
+	}
+	configMu.Unlock()
 }

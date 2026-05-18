@@ -27,8 +27,8 @@
         body { background: #07070a; color: #e4e4e7; min-height: 100dvh; font-family: 'Inter', sans-serif; }
 
         /* ── Theater mode ── */
-        .theater #page-container { max-width: 100% !important; padding-left: 1.5rem; padding-right: 1.5rem; }
-        @media (min-width: 1024px) { .theater #page-container { padding-left: 3rem; padding-right: 3rem; } }
+        .theater #page-container, .theater #page-content { max-width: 100% !important; padding-left: 1.5rem; padding-right: 1.5rem; }
+        @media (min-width: 1024px) { .theater #page-container, .theater #page-content { padding-left: 3rem; padding-right: 3rem; } }
         .theater #player-container video { max-height: 88vh; }
 
         /* ── Sticky header ── */
@@ -166,7 +166,7 @@
 </div>
 
 <!-- ═══ PAGE CONTENT ═══ -->
-<div id="page-container" class="max-w-6xl mx-auto px-4 py-6 transition-all duration-300">
+<div id="page-content" class="max-w-6xl mx-auto px-4 py-6 transition-all duration-300">
 
     <!-- Ambient glow behind player -->
     <div style="position:relative">
@@ -364,7 +364,7 @@
             </a>
             {{ end }}
             {{ if .FullPath }}
-            <form action="/delete_video" method="POST" onsubmit="return confirm('Permanently delete {{ .Filename }}?')">
+            <form action="/delete_video" method="POST" onsubmit="return confirm('Permanently delete {{ .Filename | js }}?')">
                 <input type="hidden" name="path" value="{{ .FullPath }}" />
                 <button type="submit" class="action-btn action-btn-danger">
                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
@@ -478,7 +478,7 @@
 </div>
 {{ end }}
 
-</div><!-- /page-container -->
+</div><!-- /page-content -->
 
 <script>
 // ── Dark mode ──

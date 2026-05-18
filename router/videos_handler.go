@@ -190,18 +190,29 @@ func scanVideos() []*VideoEntry {
 }
 
 func loadRecordings() *RecordingsDB {
-        empty := &RecordingsDB{Version: 2, Channels: map[string]*ChannelRecordings{}}
+	empty := &RecordingsDB{Version: 2, Channels: map[string]*ChannelRecordings{}}
 
-        // Try Supabase first
-        if dbData := server.LoadRecordingsFromDB(); dbData != nil {
-                var db RecordingsDB
-                if err := json.Unmarshal(dbData, &db); err == nil {
-                        return &db
-                }
-        }
+	var dbData []byte
 
-	// Supabase is the source of truth for recordings.
-	return empty
+	// Try Supabase first
+	if data := server.LoadRecordingsFromDB(); data != nil {
+		dbData = data
+	}
+
+	// Fall back to local file
+	if dbData == nil {
+		dbData = server.ReadDataFile("recordings.json")
+	}
+
+	if dbData == nil {
+		return empty
+	}
+
+	var db RecordingsDB
+	if err := json.Unmarshal(dbData, &db); err != nil {
+		return empty
+	}
+	return &db
 }
 
 func saveRecordings(db *RecordingsDB) {
@@ -266,6 +277,17 @@ func walkDir(dir string) []*VideoEntry {
 		spriteURL := ""
 		if d, e := os.ReadFile(full + ".sprite"); e == nil {
 			spriteURL = strings.TrimSpace(string(d))
+		}
+
+		// Fall back to preview_links table if sidecars don't exist
+		if thumbURL == "" || spriteURL == "" {
+			dbThumb, dbSprite := server.LoadPreviewLinks(item.Name())
+			if thumbURL == "" && dbThumb != "" {
+				thumbURL = dbThumb
+			}
+			if spriteURL == "" && dbSprite != "" {
+				spriteURL = dbSprite
+			}
 		}
 
 		entries = append(entries, &VideoEntry{

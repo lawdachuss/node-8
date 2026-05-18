@@ -207,7 +207,7 @@ jobs:
             echo "$!" > tunnel.pid
 
             for attempt in {1..24}; do
-              tunnel_url="$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)"
+              tunnel_url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log 2>/dev/null | head -n 1 || true)"
               if [[ -n "$tunnel_url" ]]; then
                 break 2
               fi
@@ -215,6 +215,7 @@ jobs:
             done
 
             kill "$(cat tunnel.pid)" 2>/dev/null || true
+            wait "$(cat tunnel.pid)" 2>/dev/null || true
             sleep 3
           done
 
@@ -223,13 +224,11 @@ jobs:
             echo "cloudflared failed — trying localhost.run..."
             rm -f tunnel.log tunnel.pid
             ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-              -R 80:localhost:8080 nokey@localhost.run 2>&1 |
-              stdbuf -oL grep -Eo 'https://[a-zA-Z0-9-]+\.lhr\.life' \
-              > tunnel.log 2>/dev/null &
+              -R 80:localhost:8080 nokey@localhost.run > tunnel.log 2>&1 &
             echo "$!" > tunnel.pid
 
             for attempt in {1..24}; do
-              tunnel_url="$(head -1 tunnel.log 2>/dev/null || true)"
+              tunnel_url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.lhr\.life' tunnel.log 2>/dev/null | head -n 1 || true)"
               if [[ -n "$tunnel_url" ]]; then
                 echo "Tunnel via localhost.run: $tunnel_url"
                 break
@@ -248,17 +247,20 @@ jobs:
           echo "TUNNEL_URL=$tunnel_url" >> "$GITHUB_ENV"
           echo "url=$tunnel_url" >> "$GITHUB_OUTPUT"
 
+          # Verify tunnel is reachable
+          status=""
           for attempt in {1..12}; do
-            status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 15 "$tunnel_url" 2>/dev/null || true)"
+            status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 15 "$tunnel_url" 2>/dev/null || echo "000")"
             if [[ "$status" == "200" ]]; then
               echo "Tunnel is reachable"
               break
             fi
+            echo "  Tunnel verification attempt $attempt: HTTP $status"
             sleep 5
           done
 
           if [[ "$status" != "200" ]]; then
-            echo "Tunnel URL not verified as reachable — recording still works locally"
+            echo "WARNING: Tunnel URL not verified as reachable (last status: $status) — recording still works locally"
           fi
 
           curl -fsS -X POST "${SUPABASE_URL}/rest/v1/tunnel_sessions" \
@@ -345,6 +347,28 @@ jobs:
           path: emergency-backup/
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Persist data to repository
+        if: always() && steps.config.outputs.valid == 'true' && !cancelled()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Copy generated data from container to workspace
+          docker compose cp chaturbate-dvr:/usr/src/app/conf/channels.json conf/channels.json 2>/dev/null || true
+          docker compose cp chaturbate-dvr:/database/settings.json database/settings.json 2>/dev/null || true
+          docker compose cp chaturbate-dvr:/database/recordings.json database/recordings.json 2>/dev/null || true
+          docker compose cp chaturbate-dvr:/database/tunnel.json database/tunnel.json 2>/dev/null || true
+
+          # Commit changes back to repo
+          git add conf/channels.json database/settings.json database/recordings.json database/tunnel.json
+          if git diff --cached --quiet; then
+            echo "No data changes to commit"
+          else
+            git -c user.name="recorder-bot" -c user.email="recorder@github" commit -m "chore: persist recorder data [run ${GITHUB_RUN_NUMBER}]"
+            git push
+            echo "Data committed and pushed"
+          fi
 
       - name: Queue next run
         if: always() && steps.config.outputs.valid == 'true' && !cancelled()

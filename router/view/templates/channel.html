@@ -132,7 +132,7 @@
                     {{ end }}
                     {{ if and .FullPath (not .IsOutputDir) }}
                     <div class="ml-auto">
-                        <form action="/delete_video" method="POST" onsubmit="return confirm('Delete {{ .Filename }}?')" onclick="event.stopPropagation()">
+                        <form action="/delete_video" method="POST" onsubmit="return confirm('Delete {{ .Filename | js }}?')" onclick="event.stopPropagation()">
                             <input type="hidden" name="path" value="{{ .FullPath }}" />
                             <button type="submit" class="w-7 h-7 flex items-center justify-center rounded-lg text-zinc-700 hover:text-rose-400 transition-colors" style="background:rgba(255,255,255,0.03)">
                                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>

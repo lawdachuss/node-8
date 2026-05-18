@@ -121,29 +121,28 @@ type UpdateConfigRequest struct {
 
 // UpdateConfig updates the server configuration (form from Web UI or JSON from cookie-refresher).
 func UpdateConfig(c *gin.Context) {
-        var req UpdateConfigRequest
-        if err := c.ShouldBind(&req); err != nil {
-                c.AbortWithError(http.StatusBadRequest, fmt.Errorf("bind: %w", err))
-                return
-        }
+	var req UpdateConfigRequest
+	if err := c.ShouldBind(&req); err != nil {
+		c.AbortWithError(http.StatusBadRequest, fmt.Errorf("bind: %w", err))
+		return
+	}
 
-        if req.Cookies != "" {
-                server.Config.Cookies = req.Cookies
-        }
-        if req.UserAgent != "" {
-                server.Config.UserAgent = req.UserAgent
-        }
-        server.Config.ByparrURL = req.ByparrURL
+	if req.Cookies != "" || req.UserAgent != "" {
+		server.UpdateByparrCredentials(req.Cookies, req.UserAgent)
+	}
+	if req.ByparrURL != "" {
+		server.Config.ByparrURL = req.ByparrURL
+	}
 
-        if err := server.SaveSettings(); err != nil {
-                fmt.Printf("[WARN] could not save settings: %v\n", err)
-        }
+	if err := server.SaveSettings(); err != nil {
+		fmt.Printf("[WARN] could not save settings: %v\n", err)
+	}
 
-        if c.ContentType() == "application/json" {
-                c.JSON(http.StatusOK, gin.H{"ok": true})
-                return
-        }
-        c.Redirect(http.StatusFound, "/")
+	if c.ContentType() == "application/json" {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+		return
+	}
+	c.Redirect(http.StatusFound, "/")
 }
 
 // Download serves a video file for download.
@@ -321,9 +320,20 @@ func VideoDetail(c *gin.Context) {
         stat, statErr := os.Stat(abs)
         fileOnDisk := statErr == nil
 
-        // Read sidecar data (only for disk files)
-        thumbURL := readSidecar(abs + ".thumb")
-        spriteURL := readSidecar(abs + ".sprite")
+	// Read sidecar data (only for disk files)
+	thumbURL := readSidecar(abs + ".thumb")
+	spriteURL := readSidecar(abs + ".sprite")
+
+	// Fall back to preview_links table if sidecars don't exist
+	if thumbURL == "" || spriteURL == "" {
+		dbThumb, dbSprite := server.LoadPreviewLinks(filename)
+		if thumbURL == "" && dbThumb != "" {
+			thumbURL = dbThumb
+		}
+		if spriteURL == "" && dbSprite != "" {
+			spriteURL = dbSprite
+		}
+	}
 
         // Look up recording metadata from recordings DB
         db := loadRecordings()

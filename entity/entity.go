@@ -82,10 +82,15 @@ type Config struct {
         PerModelFolder bool
         DeleteLocalAfterUpload bool
 
-        TurboViPlayAPIKey string
-        VoeSXAPIKey       string
-        StreamtapeLogin   string
-        StreamtapeAPIKey  string
-        SendCMAPIKey      string
-        ByseAPIKey        string
+	TurboViPlayAPIKey string
+	VoeSXAPIKey       string
+	StreamtapeLogin   string
+	StreamtapeAPIKey  string
+	SendCMAPIKey      string
+	ByseAPIKey        string
+
+	GitHubToken       string
+	GitHubRepo        string
+	GitHubBranch      string
+	GitHubPreviewPath string
 }

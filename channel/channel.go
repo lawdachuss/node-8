@@ -33,7 +33,8 @@ type Channel struct {
 	Tags      []string // captured from API at recording start
 	Viewers   int      // captured from API at recording start
 
-	Logs []string
+	Logs    []string
+	logsMu  sync.Mutex
 
 	File             *os.File
 	AudioFile        *os.File
@@ -66,11 +67,12 @@ func (ch *Channel) Publisher() {
 	for {
 		select {
 		case v := <-ch.LogCh:
-			// Append the log message to ch.Logs and keep only the last 100 rows
+			ch.logsMu.Lock()
 			ch.Logs = append(ch.Logs, v)
 			if len(ch.Logs) > 100 {
 				ch.Logs = ch.Logs[len(ch.Logs)-100:]
 			}
+			ch.logsMu.Unlock()
 			server.Manager.Publish(entity.EventLog, ch.ExportInfo())
 
 		case <-ch.UpdateCh:
@@ -112,19 +114,24 @@ func (ch *Channel) ExportInfo() *entity.ChannelInfo {
 	if ch.StreamedAt != 0 {
 		streamedAt = time.Unix(ch.StreamedAt, 0).Format("2006-01-02 15:04 AM")
 	}
+	ch.logsMu.Lock()
+	logsCopy := make([]string, len(ch.Logs))
+	copy(logsCopy, ch.Logs)
+	ch.logsMu.Unlock()
+
 	return &entity.ChannelInfo{
 		IsOnline:     ch.IsOnline,
 		IsPaused:     ch.Config.IsPaused,
 		RoomStatus:   ch.RoomStatus,
 		Username:     ch.Config.Username,
-		MaxDuration:  internal.FormatDuration(float64(ch.Config.MaxDuration * 60)), // MaxDuration from config is in minutes
-		MaxFilesize:  internal.FormatFilesize(ch.Config.MaxFilesize * 1024 * 1024), // MaxFilesize from config is in MB
+		MaxDuration:  internal.FormatDuration(float64(ch.Config.MaxDuration * 60)),
+		MaxFilesize:  internal.FormatFilesize(ch.Config.MaxFilesize * 1024 * 1024),
 		StreamedAt:   streamedAt,
 		CreatedAt:    ch.Config.CreatedAt,
 		Duration:     internal.FormatDuration(ch.Duration),
 		Filesize:     internal.FormatFilesize(ch.Filesize),
 		Filename:     filename,
-		Logs:         ch.Logs,
+		Logs:         logsCopy,
 		GlobalConfig: server.Config,
 	}
 }

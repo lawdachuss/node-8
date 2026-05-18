@@ -12,8 +12,6 @@ import (
 	"github.com/teacat/chaturbate-dvr/uploader"
 )
 
-const recordingsDBPath = "/database/recordings.json"
-
 type recEntry struct {
 	Filename     string            `json:"filename"`
 	Timestamp    string            `json:"timestamp"`
@@ -49,7 +47,7 @@ func loadRecDB() *recDB {
 	}
 
 	// Fall back to local file
-	data, err := os.ReadFile(recordingsDBPath)
+	data, err := os.ReadFile(server.DataPath("recordings.json"))
 	if err != nil {
 		return empty
 	}
@@ -66,14 +64,12 @@ func saveRecDB(db *recDB) {
 		return
 	}
 
-	dbDir := filepath.Dir(recordingsDBPath)
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
-		fmt.Printf("[WARN] [db] could not create recordings directory %s: %v\n", dbDir, err)
-	} else if err := os.WriteFile(recordingsDBPath, data, 0o644); err != nil {
+	// Write to local file (best-effort)
+	if err := server.WriteDataFile("recordings.json", data); err != nil {
 		fmt.Printf("[WARN] [db] could not save recordings to local file: %v\n", err)
 	}
 
-	// Save to Supabase if configured
+	// Save to Supabase (best-effort)
 	if err := server.SaveRecordingsToDB(data); err != nil {
 		fmt.Printf("[WARN] [db] could not save recordings to Supabase: %v\n", err)
 	}
@@ -171,6 +167,7 @@ func (ch *Channel) uploadFile(filePath string) bool {
 			spriteURL = strings.TrimSpace(string(d))
 		}
 
+		server.RecMu.Lock()
 		db := loadRecDB()
 		username := ch.Config.Username
 		chanData, ok := db.Channels[username]
@@ -215,16 +212,32 @@ func (ch *Channel) uploadFile(filePath string) bool {
 			chanData.Recordings = append(chanData.Recordings, entry)
 		}
 		saveRecDB(db)
+		server.RecMu.Unlock()
 		ch.Info("upload: saved upload links to database for %s", filename)
+
+		// Save preview links to dedicated table for fast lookup
+		if thumbURL != "" || spriteURL != "" {
+			if err := server.SavePreviewLinks(filename, thumbURL, spriteURL); err != nil {
+				ch.Error("upload: could not save preview links for %s: %v", filename, err)
+			} else {
+				ch.Info("upload: saved preview links for %s", filename)
+			}
+		}
+
 		// If configured to delete local files after upload, remove
 		// the video and any generated sidecars (thumbnails/sprites).
+		// Only delete if we successfully saved the URLs to the database.
 		if server.Config != nil && server.Config.DeleteLocalAfterUpload {
-			_ = os.Remove(filePath)
-			_ = os.Remove(filePath + ".thumb.jpg")
-			_ = os.Remove(filePath + ".sprite.jpg")
-			_ = os.Remove(filePath + ".thumb")
-			_ = os.Remove(filePath + ".sprite")
-			ch.Info("upload: removed local files for %s", filename)
+			if thumbURL == "" && spriteURL == "" {
+				ch.Error("upload: skipping local file deletion for %s — no preview URLs were saved to database", filename)
+			} else {
+				_ = os.Remove(filePath)
+				_ = os.Remove(filePath + ".thumb.jpg")
+				_ = os.Remove(filePath + ".sprite.jpg")
+				_ = os.Remove(filePath + ".thumb")
+				_ = os.Remove(filePath + ".sprite")
+				ch.Info("upload: removed local files for %s", filename)
+			}
 		}
 	}
 

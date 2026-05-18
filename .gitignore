@@ -20,12 +20,13 @@ videos/*
 conf/*
 !conf/.gitkeep
 !conf/channels.json
-settings.json
 
 # Database files
 database/*
 !database/.gitkeep
 !database/recordings.json
+!database/settings.json
+!database/tunnel.json
 
 # AWS secrets and keys
 aws-secrets/

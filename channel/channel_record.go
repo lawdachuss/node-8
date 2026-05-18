@@ -22,19 +22,18 @@ func (ch *Channel) Monitor() {
         // and will be called by `Pause` or `Stop` functions
         ctx, _ := ch.WithCancel(context.Background())
 
-        var err error
-        for {
-                if err = ctx.Err(); err != nil {
-                        break
-                }
+	var err error
+	cfBlockCount := 0
+	for {
+		if err = ctx.Err(); err != nil {
+			break
+		}
 
-                pipeline := func() error {
-                        return ch.RecordStream(ctx, client)
-                }
+		pipeline := func() error {
+			return ch.RecordStream(ctx, client)
+		}
 
-                cfBlockCount := 0
-
-                onRetry := func(_ uint, err error) {
+		onRetry := func(_ uint, err error) {
                         ch.UpdateOnlineStatus(false)
 
                         if isCFBlock(err) {
@@ -247,16 +246,17 @@ func (ch *Channel) OnPollComplete() error {
 }
 
 // HandleAudioSegment processes and writes audio segment data to a sidecar file.
-func (ch *Channel) HandleAudioSegment(b []byte, _ float64) error {
-        if ch.AudioFile == nil {
-                return nil
-        }
-        if ch.Config.IsPaused {
-                return retry.Unrecoverable(internal.ErrPaused)
-        }
+func (ch *Channel) HandleAudioSegment(b []byte, duration float64) error {
+	if ch.AudioFile == nil {
+		return nil
+	}
+	if ch.Config.IsPaused {
+		return retry.Unrecoverable(internal.ErrPaused)
+	}
 
-        if _, err := ch.AudioFile.Write(b); err != nil {
-                return fmt.Errorf("write audio file: %w", err)
-        }
-        return nil
+	if _, err := ch.AudioFile.Write(b); err != nil {
+		return fmt.Errorf("write audio file: %w", err)
+	}
+	ch.Duration += duration
+	return nil
 }

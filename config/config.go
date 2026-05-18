@@ -44,8 +44,12 @@ func New(c *cli.Context) (*entity.Config, error) {
                 VoeSXAPIKey:       c.String("voesx-api-key"),
                 StreamtapeLogin:   c.String("streamtape-login"),
                 StreamtapeAPIKey:  c.String("streamtape-api-key"),
-                SendCMAPIKey:      c.String("sendcm-api-key"),
-                ByseAPIKey:        c.String("byse-api-key"),
-                ByparrURL:         c.String("flaresolverr-url"),
+		SendCMAPIKey:      c.String("sendcm-api-key"),
+		ByseAPIKey:        c.String("byse-api-key"),
+		GitHubToken:       c.String("github-token"),
+		GitHubRepo:        c.String("github-repo"),
+		GitHubBranch:      c.String("github-branch"),
+		GitHubPreviewPath: c.String("github-preview-path"),
+		ByparrURL:         c.String("flaresolverr-url"),
         }, nil
 }

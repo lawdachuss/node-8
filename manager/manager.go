@@ -96,14 +96,11 @@ func (m *Manager) refreshCookiesOnce() bool {
                 return false
         }
 
-        server.Config.Cookies = cookies
-        if userAgent != "" {
-                server.Config.UserAgent = userAgent
-        }
-        if err := server.SaveSettings(); err != nil {
-                fmt.Printf("[WARN] [cookie-refresher] could not persist cookies: %v\n", err)
-                return false
-        }
+	server.UpdateByparrCredentials(cookies, userAgent)
+	if err := server.SaveSettings(); err != nil {
+		fmt.Printf("[WARN] [cookie-refresher] could not persist cookies: %v\n", err)
+		return false
+	}
         fmt.Println(" INFO [cookie-refresher] cookies refreshed and saved — recording will resume shortly")
         return true
 }

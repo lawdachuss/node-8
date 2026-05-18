@@ -57,6 +57,7 @@
       - .env
     environment:
       - FLARESOLVERR_URL=http://byparr-lb/v1
+      - DATA_DIR=/database
       - SUPABASE_URL=${SUPABASE_URL:-}
       - SUPABASE_API_KEY=${SUPABASE_API_KEY:-}
       - VOESX_API_KEY=${VOESX_API_KEY:-}

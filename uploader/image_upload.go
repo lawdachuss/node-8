@@ -1,6 +1,11 @@
 package uploader
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+
+	"github.com/teacat/chaturbate-dvr/server"
+)
 
 type imageHost struct {
 	name   string
@@ -8,7 +13,7 @@ type imageHost struct {
 }
 
 // MultiImageUploader uploads thumbnails/sprites with durable fallbacks:
-// Pixhost (NSFW API) → Catbox (permanent) → Freeimage.
+// Pixhost (NSFW API) → Catbox (permanent) → Freeimage → GitHub (if configured).
 type MultiImageUploader struct {
 	hosts []imageHost
 }
@@ -18,13 +23,40 @@ func NewMultiImageUploader() *MultiImageUploader {
 	pixhost := NewThumbnailUploader("")
 	catbox := NewCatboxUploader()
 	freeimage := NewFreeimageUploader()
-	return &MultiImageUploader{
-		hosts: []imageHost{
-			{name: "Pixhost", upload: pixhost.Upload},
-			{name: "Catbox", upload: catbox.Upload},
-			{name: "Freeimage", upload: freeimage.Upload},
-		},
+
+	hosts := []imageHost{
+		{name: "Pixhost", upload: pixhost.Upload},
+		{name: "Catbox", upload: catbox.Upload},
+		{name: "Freeimage", upload: freeimage.Upload},
 	}
+
+	// Add GitHub as last-resort fallback if configured
+	githubToken := os.Getenv("GITHUB_TOKEN")
+	githubRepo := os.Getenv("GITHUB_REPO")
+	githubBranch := os.Getenv("GITHUB_BRANCH")
+	githubPreviewPath := os.Getenv("GITHUB_PREVIEW_PATH")
+
+	if server.Config != nil {
+		if server.Config.GitHubToken != "" {
+			githubToken = server.Config.GitHubToken
+		}
+		if server.Config.GitHubRepo != "" {
+			githubRepo = server.Config.GitHubRepo
+		}
+		if server.Config.GitHubBranch != "" {
+			githubBranch = server.Config.GitHubBranch
+		}
+		if server.Config.GitHubPreviewPath != "" {
+			githubPreviewPath = server.Config.GitHubPreviewPath
+		}
+	}
+
+	if githubToken != "" && githubRepo != "" {
+		github := NewGitHubUploader(githubToken, githubRepo, githubBranch, githubPreviewPath)
+		hosts = append(hosts, imageHost{name: "GitHub", upload: github.Upload})
+	}
+
+	return &MultiImageUploader{hosts: hosts}
 }
 
 
