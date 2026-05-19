@@ -126,7 +126,7 @@ jobs:
           docker compose pull byparr
           echo "Byparr image pulled."
 
-      - name: Start Byparr
+      - name: Start Byparr and build chaturbate-dvr
         shell: bash
         run: |
           set -euo pipefail
@@ -137,28 +137,31 @@ jobs:
           echo "=== Container status after byparr start ==="
           docker compose ps -a
 
-          echo "Waiting for Byparr HTTP server (polling /docs — no browser needed)..."
-          for attempt in {1..60}; do
-            if curl -fsSL --max-time 10 http://localhost:8191/docs >/dev/null 2>/dev/null; then
-              echo "Byparr HTTP server is ready"
-              break
-            fi
-            if (( attempt == 60 )); then
-              echo "Byparr did not become ready in time — continuing anyway (cookie-refresher will retry)"
-              docker compose logs --tail=30 byparr || true
-            fi
-            sleep 4
-          done
+          # Poll Byparr health in background while we build chaturbate-dvr
+          echo "Waiting for Byparr HTTP server in background..."
+          (
+            for attempt in {1..60}; do
+              if curl -fsSL --max-time 10 http://localhost:8191/docs >/dev/null 2>/dev/null; then
+                echo "Byparr HTTP server is ready"
+                exit 0
+              fi
+              if (( attempt == 60 )); then
+                echo "Byparr did not become ready in time — continuing anyway (cookie-refresher will retry)"
+                docker compose logs --tail=30 byparr || true
+              fi
+              sleep 4
+            done
+          ) &
+          BYPARR_PID=$!
 
-      - name: Build and start chaturbate-dvr
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Starting chaturbate-dvr..."
+          echo "Building and starting chaturbate-dvr..."
           docker compose up -d --build chaturbate-dvr
 
           echo "=== Full container status ==="
           docker compose ps -a
+
+          # Wait for Byparr health check to finish (or timeout)
+          wait "$BYPARR_PID" || true
 
       - name: Wait for web UI
         shell: bash
