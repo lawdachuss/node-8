@@ -20,8 +20,8 @@ const (
         spriteFrames = 16
         spriteCols   = 4
         spriteRows   = 4
-        spriteFrameW = 320
-        spriteFrameH = 180
+        spriteFrameW = 640
+        spriteFrameH = 360
 )
 
 // generateThumbnail is the channel-scoped wrapper — logs go to the channel log.
@@ -109,9 +109,10 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
                 }
         }()
 
-        // ── Sprite sheet (5×4 grid covering the full video duration) ───────────
+        // ── Sprite sheet (4×4 grid covering the full video duration) ───────────
         // Each frame is spriteFrameW×spriteFrameH px; total image is
-        // (spriteCols*spriteFrameW) × (spriteRows*spriteFrameH) = 1280×576.
+        // (spriteCols*spriteFrameW) × (spriteRows*spriteFrameH) = 2560×1440.
+        // Using 640×360 frames so HiDPI/Retina displays get sharp previews.
         go func() {
                 spriteJPG := videoPath + ".sprite.jpg"
 
@@ -126,10 +127,11 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
                 }
 
                 // fps=1/INTERVAL extracts one frame per interval.
-                // scale + pad keeps each tile at exactly spriteFrameW×spriteFrameH.
+                // scale with lanczos gives sharper results than the default bilinear.
+                // pad keeps each tile at exactly spriteFrameW×spriteFrameH.
                 // tile=COLSxROWS assembles them into the contact sheet.
                 vf := fmt.Sprintf(
-                        "fps=1/%.4f,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,tile=%dx%d",
+                        "fps=1/%.4f,scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,tile=%dx%d",
                         interval,
                         spriteFrameW, spriteFrameH,
                         spriteFrameW, spriteFrameH,
