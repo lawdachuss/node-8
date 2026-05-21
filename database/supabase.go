@@ -1,29 +1,30 @@
 package database
 
 import (
-        "bytes"
-        "encoding/json"
-        "fmt"
-        "io"
-        "net/http"
-        "net/url"
-        "time"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
 )
 
 // Client represents a Supabase database client
 type Client struct {
-        URL    string
-        APIKey string
-        client *http.Client
+	URL    string
+	APIKey string
+	client *http.Client
 }
 
 // NewClient creates a new Supabase client
 func NewClient(url, apiKey string) *Client {
-        return &Client{
-                URL:    url,
-                APIKey: apiKey,
-                client: &http.Client{Timeout: 15 * time.Second},
-        }
+	return &Client{
+		URL:    url,
+		APIKey: apiKey,
+		client: &http.Client{Timeout: 15 * time.Second},
+	}
 }
 
 // ============================================================================
@@ -31,76 +32,109 @@ func NewClient(url, apiKey string) *Client {
 // ============================================================================
 
 func (c *Client) request(method, path string, body interface{}) (*http.Response, error) {
-        var bodyReader io.Reader
-        if body != nil {
-                jsonData, err := json.Marshal(body)
-                if err != nil {
-                        return nil, fmt.Errorf("marshal body: %w", err)
-                }
-                bodyReader = bytes.NewReader(jsonData)
-        }
+	var bodyReader io.Reader
+	if body != nil {
+		jsonData, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("marshal body: %w", err)
+		}
+		bodyReader = bytes.NewReader(jsonData)
+	}
 
-        req, err := http.NewRequest(method, c.URL+"/rest/v1"+path, bodyReader)
-        if err != nil {
-                return nil, fmt.Errorf("create request: %w", err)
-        }
+	req, err := http.NewRequest(method, c.URL+"/rest/v1"+path, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
 
-        req.Header.Set("apikey", c.APIKey)
-        req.Header.Set("Authorization", "Bearer "+c.APIKey)
-        if body != nil {
-                req.Header.Set("Content-Type", "application/json")
-                // Use resolution=merge-duplicates for upsert behavior
-                req.Header.Set("Prefer", "resolution=merge-duplicates,return=representation")
-        }
+	req.Header.Set("apikey", c.APIKey)
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+		// Use resolution=merge-duplicates for upsert behavior
+		req.Header.Set("Prefer", "resolution=merge-duplicates,return=representation")
+	}
 
-        return c.client.Do(req)
+	return c.client.Do(req)
+}
+
+// requestWithRetry executes the request and retries on transient 503 errors
+// (PGRST002 — schema cache rebuilding after migration).
+func (c *Client) requestWithRetry(method, path string, body interface{}) (*http.Response, error) {
+	const maxRetries = 5
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		resp, err := c.request(method, path, body)
+		if err != nil {
+			return nil, err
+		}
+
+		// Check for transient 503 PGRST002 error
+		if resp.StatusCode == 503 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if strings.Contains(string(bodyBytes), "PGRST002") {
+				lastErr = fmt.Errorf("HTTP 503: %s", string(bodyBytes))
+				backoff := time.Duration(2<<attempt) * time.Second
+				fmt.Printf("[WARN] Supabase schema cache not ready (attempt %d/%d), retrying in %v\n", attempt+1, maxRetries, backoff)
+				time.Sleep(backoff)
+				continue
+			}
+			// Non-retryable 503
+			return nil, fmt.Errorf("HTTP 503: %s", string(bodyBytes))
+		}
+
+		return resp, nil
+	}
+
+	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
 func (c *Client) get(path string, result interface{}) error {
-        resp, err := c.request("GET", path, nil)
-        if err != nil {
-                return err
-        }
-        defer resp.Body.Close()
+	resp, err := c.requestWithRetry("GET", path, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-        if resp.StatusCode >= 400 {
-                body, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-        }
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
 
-        return json.NewDecoder(resp.Body).Decode(result)
+	return json.NewDecoder(resp.Body).Decode(result)
 }
 
 func (c *Client) post(path string, body interface{}, result interface{}) error {
-        resp, err := c.request("POST", path, body)
-        if err != nil {
-                return err
-        }
-        defer resp.Body.Close()
+	resp, err := c.requestWithRetry("POST", path, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-        if resp.StatusCode >= 400 {
-                bodyBytes, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-        }
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
 
-        if result != nil && resp.StatusCode != http.StatusNoContent {
-                return json.NewDecoder(resp.Body).Decode(result)
-        }
-        return nil
+	if result != nil && resp.StatusCode != http.StatusNoContent {
+		return json.NewDecoder(resp.Body).Decode(result)
+	}
+	return nil
 }
 
 func (c *Client) patch(path string, body interface{}) error {
-        resp, err := c.request("PATCH", path, body)
-        if err != nil {
-                return err
-        }
-        defer resp.Body.Close()
+	resp, err := c.requestWithRetry("PATCH", path, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-        if resp.StatusCode >= 400 {
-                bodyBytes, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-        }
-        return nil
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
 }
 
 func (c *Client) delete(path string) error {
