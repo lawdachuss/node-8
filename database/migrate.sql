@@ -92,11 +92,13 @@ CREATE TABLE IF NOT EXISTS tunnels (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     url TEXT NOT NULL,
     run_id INTEGER,
-    instance_id TEXT NOT NULL DEFAULT 'default',
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     expires_at TIMESTAMP WITH TIME ZONE
 );
+
+-- Add instance_id column for existing tables (safe re-run)
+ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default';
 
 CREATE INDEX IF NOT EXISTS idx_tunnels_active ON tunnels(is_active, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tunnels_run_id ON tunnels(run_id);
@@ -108,12 +110,14 @@ CREATE INDEX IF NOT EXISTS idx_tunnels_instance ON tunnels(instance_id);
 CREATE TABLE IF NOT EXISTS tunnel_sessions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     run_id INTEGER NOT NULL,
-    instance_id TEXT NOT NULL DEFAULT 'default',
     url TEXT NOT NULL,
     started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_seen_at TIMESTAMP WITH TIME ZONE,
     is_active BOOLEAN DEFAULT TRUE
 );
+
+-- Add instance_id column for existing tables (safe re-run)
+ALTER TABLE tunnel_sessions ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default';
 
 CREATE INDEX IF NOT EXISTS idx_tunnel_sessions_run ON tunnel_sessions(run_id);
 CREATE INDEX IF NOT EXISTS idx_tunnel_sessions_instance ON tunnel_sessions(instance_id);
