@@ -72,16 +72,32 @@ type VideosData struct {
         Videos      []*VideoEntry
         Groups      []VideoGroup
         Recommended []*VideoEntry
+        TagFilter   string
 }
 
 func Videos(c *gin.Context) {
         videos := scanVideos()
+
+        // Filter by tag if provided
+        tagFilter := c.Query("tag")
+        if tagFilter != "" {
+                filtered := make([]*VideoEntry, 0, len(videos))
+                for _, v := range videos {
+                        for _, t := range v.Tags {
+                                if strings.EqualFold(t, tagFilter) {
+                                        filtered = append(filtered, v)
+                                        break
+                                }
+                        }
+                }
+                videos = filtered
+        }
+
         groups := groupVideos(videos)
 
         // Show most recently added videos in the "Recommended" slot on the library page.
-        // Using a fixed reference video (videos[0]) was arbitrary and misleading.
         var recommended []*VideoEntry
-        if len(videos) > 0 {
+        if len(videos) > 0 && tagFilter == "" {
                 sorted := make([]*VideoEntry, len(videos))
                 copy(sorted, videos)
                 sort.Slice(sorted, func(i, j int) bool {
@@ -99,6 +115,7 @@ func Videos(c *gin.Context) {
                 Videos:      videos,
                 Groups:      groups,
                 Recommended: recommended,
+                TagFilter:   tagFilter,
         })
 }
 
@@ -196,12 +213,18 @@ func scanVideos() []*VideoEntry {
                                         spriteURL = links[1]
                                 }
                         }
+                        modTime := rec.Timestamp
+                        if t, err := time.Parse(time.RFC3339, rec.Timestamp); err == nil {
+                                modTime = t.Format("2006-01-02 15:04")
+                        } else if t, err := time.Parse("2006-01-02T15:04:05Z", rec.Timestamp); err == nil {
+                                modTime = t.Format("2006-01-02 15:04")
+                        }
                         entries = append(entries, &VideoEntry{
                                 Username:     username,
                                 Filename:     filename,
                                 FullPath:     "",
                                 Size:         fs,
-                                ModTime:      rec.Timestamp,
+                                ModTime:      modTime,
                                 ModTimeSort:  rec.Timestamp,
                                 IsOutputDir:  false,
                                 Links:        rec.Links,
