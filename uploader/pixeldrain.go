@@ -84,8 +84,9 @@ func (u *PixeldrainUploader) Upload(filePath string) (string, error) {
 	req.Header.Set("User-Agent", defaultUserAgent)
 
 	// PixelDrain expects the API key in the HTTP Basic Auth password field.
+	// Use an empty username and the API key as the password.
 	if u.token != "" {
-		req.SetBasicAuth("api", u.token)
+		req.SetBasicAuth("", u.token)
 	}
 
 	resp, err := u.client.Do(req)

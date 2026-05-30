@@ -97,6 +97,11 @@ func (u *MixdropUploader) Upload(filePath string) (string, error) {
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("User-Agent", defaultUserAgent)
 
+	// Fallback: include token in Authorization header if the API expects it there.
+	if u.token != "" {
+		req.Header.Set("Authorization", "Bearer "+u.token)
+	}
+
 	resp, err := u.client.Do(req)
 	if err != nil {
 		select {
