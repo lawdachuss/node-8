@@ -85,10 +85,9 @@ func New(conf *entity.ChannelConfig) *Channel {
 	return ch
 }
 
-// Publisher listens for log messages and updates from the channel
-// and publishes once received.  Rapid updates are coalesced within a
-// 500 ms window so the SSE server is not overwhelmed when hundreds of
-// channels are updating simultaneously.
+// Publisher listens for log messages and updates from the channel.
+// Progress updates are coalesced so busy channels do not repaint the UI more
+// often than a person can read it.
 func (ch *Channel) Publisher() {
 	updateTimer := time.NewTimer(0)
 	if !updateTimer.Stop() {
@@ -104,16 +103,16 @@ func (ch *Channel) Publisher() {
 				ch.Logs = ch.Logs[len(ch.Logs)-100:]
 			}
 			ch.logsMu.Unlock()
-			server.Manager.Publish(entity.EventLog, ch.ExportInfo())
+			server.Manager.PublishLog(ch.Config.Username, v)
 
 		case <-ch.UpdateCh:
 			if !pendingUpdate {
 				pendingUpdate = true
-				updateTimer.Reset(500 * time.Millisecond)
+				updateTimer.Reset(2 * time.Second)
 			}
 		case <-updateTimer.C:
 			pendingUpdate = false
-			server.Manager.Publish(entity.EventUpdate, ch.ExportInfo())
+			server.Manager.Publish(entity.EventUpdate, ch.ExportStatusInfo())
 		case <-ch.done:
 			updateTimer.Stop()
 			return
@@ -165,6 +164,16 @@ func (ch *Channel) Error(format string, a ...any) {
 
 // ExportInfo exports the channel information as a ChannelInfo struct.
 func (ch *Channel) ExportInfo() *entity.ChannelInfo {
+	return ch.exportInfo(true)
+}
+
+// ExportStatusInfo exports the channel state without copying logs. SSE status
+// swaps do not render historical logs, so this keeps hot updates cheap.
+func (ch *Channel) ExportStatusInfo() *entity.ChannelInfo {
+	return ch.exportInfo(false)
+}
+
+func (ch *Channel) exportInfo(includeLogs bool) *entity.ChannelInfo {
 	var filename string
 	if ch.CurrentFilename != "" && ch.HasSeparateAudio {
 		filename = ch.CurrentFilename + ".mp4"
@@ -183,10 +192,13 @@ func (ch *Channel) ExportInfo() *entity.ChannelInfo {
 	filesize := ch.Filesize
 	ch.stateMu.Unlock()
 
-	ch.logsMu.Lock()
-	logsCopy := make([]string, len(ch.Logs))
-	copy(logsCopy, ch.Logs)
-	ch.logsMu.Unlock()
+	var logsCopy []string
+	if includeLogs {
+		ch.logsMu.Lock()
+		logsCopy = make([]string, len(ch.Logs))
+		copy(logsCopy, ch.Logs)
+		ch.logsMu.Unlock()
+	}
 
 	return &entity.ChannelInfo{
 		IsOnline:      isOnline,

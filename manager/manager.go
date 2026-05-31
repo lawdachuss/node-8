@@ -299,21 +299,7 @@ func (m *Manager) ChannelInfo() []*entity.ChannelInfo {
 	})
 
 	sort.Slice(channels, func(i, j int) bool {
-		// Paused channels always sort to the bottom.
-		getPriority := func(c *entity.ChannelInfo) int {
-			switch {
-			case !c.IsPaused && c.IsOnline:
-				return 0 // Recording
-			case !c.IsPaused:
-				return 1 // Offline, actively watching
-			case c.IsOnline:
-				return 2 // Paused, currently online
-			default:
-				return 3 // Paused, offline
-			}
-		}
-
-		pi, pj := getPriority(channels[i]), getPriority(channels[j])
+		pi, pj := channelSortPriority(channels[i]), channelSortPriority(channels[j])
 		if pi != pj {
 			return pi < pj
 		}
@@ -322,6 +308,19 @@ func (m *Manager) ChannelInfo() []*entity.ChannelInfo {
 	})
 
 	return channels
+}
+
+func channelSortPriority(c *entity.ChannelInfo) int {
+	switch {
+	case !c.IsPaused && c.IsOnline:
+		return 0 // Recording
+	case c.IsPaused:
+		return 1 // Paused, whether currently online or offline
+	case c.IsConnecting:
+		return 2 // Reconnecting / actively watching
+	default:
+		return 3 // Offline
+	}
 }
 
 // Publish sends an SSE event to the specified channel.
@@ -345,6 +344,16 @@ func (m *Manager) Publish(evt entity.Event, info *entity.ChannelInfo) {
 			})
 		}
 	}
+}
+
+func (m *Manager) PublishLog(username, line string) {
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	m.SSE.Publish("updates", &sse.Event{
+		Event: []byte(username + "-log"),
+		Data:  []byte(line),
+	})
 }
 
 // Subscriber handles SSE subscriptions for the specified channel.

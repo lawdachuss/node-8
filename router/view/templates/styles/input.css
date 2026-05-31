@@ -172,6 +172,29 @@ select {
 .channel-item[data-priority="0"].selected .channel-username {
   color: #d1fae5;
 }
+.channel-item[data-priority="1"].selected {
+  border-left-color: #d97706;
+  background-color: rgba(217,119,6,0.08);
+}
+.channel-item[data-priority="1"].selected .channel-username {
+  color: #fde68a;
+}
+.channel-section-label {
+  margin: 8px 6px 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+  color: #52525b;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.channel-section-label:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
 
 /* ── Log container (terminal) ── */
 .log-container {
@@ -356,9 +379,9 @@ input:focus, textarea:focus, select:focus {
   border: 1px solid rgba(63,63,70,0.6);
 }
 .badge-paused {
-  background: rgba(239,68,68,0.1);
-  color: #f87171;
-  border: 1px solid rgba(239,68,68,0.2);
+  background: rgba(245,158,11,0.12);
+  color: #fbbf24;
+  border: 1px solid rgba(245,158,11,0.25);
 }
 
 /* ── Noise texture overlay for depth ── */
