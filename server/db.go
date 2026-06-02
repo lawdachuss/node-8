@@ -297,31 +297,32 @@ func SaveRecordingsToDB(data []byte) error {
                 return fmt.Errorf("Supabase not configured")
         }
 
-        // Parse the JSON data
-        type RecordingEntry struct {
-                Filename     string            `json:"filename"`
-                Timestamp    string            `json:"timestamp"`
-                RoomTitle    string            `json:"room_title"`
-                Tags         []string          `json:"tags"`
-                Viewers      int               `json:"viewers"`
-                Resolution   string            `json:"resolution"`
-                Framerate    int               `json:"framerate"`
-                Links        map[string]string `json:"links"`
-                ThumbnailURL string            `json:"thumbnail_url"`
-                SpriteURL    string            `json:"sprite_url"`
-                EmbedURL     string            `json:"embed_url"`
-                Filesize     int64             `json:"filesize"`
-        }
+	// Parse the JSON data
+		type RecordingEntry struct {
+			Filename     string            `json:"filename"`
+			Timestamp    string            `json:"timestamp"`
+			RoomTitle    string            `json:"room_title"`
+			Tags         []string          `json:"tags"`
+			Viewers      int               `json:"viewers"`
+			Resolution   string            `json:"resolution"`
+			Framerate    int               `json:"framerate"`
+			Links        map[string]string `json:"links"`
+			ThumbnailURL string            `json:"thumbnail_url"`
+			SpriteURL    string            `json:"sprite_url"`
+			PreviewURL   string            `json:"preview_url"`
+			EmbedURL     string            `json:"embed_url"`
+			Filesize     int64             `json:"filesize"`
+		}
 
-        type ChannelRecordings struct {
-                Gender     string            `json:"gender"`
-                Recordings []RecordingEntry  `json:"recordings"`
-        }
+		type ChannelRecordings struct {
+			Gender     string            `json:"gender"`
+			Recordings []RecordingEntry  `json:"recordings"`
+		}
 
-        type RecordingsDB struct {
-                Version  int                          `json:"version"`
-                Channels map[string]*ChannelRecordings `json:"channels"`
-        }
+		type RecordingsDB struct {
+			Version  int                          `json:"version"`
+			Channels map[string]*ChannelRecordings `json:"channels"`
+		}
 
         var db RecordingsDB
         if err := json.Unmarshal(data, &db); err != nil {
@@ -402,30 +403,31 @@ func LoadRecordingsFromDB() []byte {
 	}
 
 	// Convert to the old JSON format for compatibility
-	type RecordingEntry struct {
-		Filename     string            `json:"filename"`
-		Timestamp    string            `json:"timestamp"`
-		RoomTitle    string            `json:"room_title"`
-		Tags         []string          `json:"tags"`
-		Viewers      int               `json:"viewers"`
-		Resolution   string            `json:"resolution"`
-		Framerate    int               `json:"framerate"`
-		Links        map[string]string `json:"links"`
-		ThumbnailURL string            `json:"thumbnail_url"`
-		SpriteURL    string            `json:"sprite_url"`
-		EmbedURL     string            `json:"embed_url"`
-		Filesize     int64             `json:"filesize"`
-	}
+		type RecordingEntry struct {
+			Filename     string            `json:"filename"`
+			Timestamp    string            `json:"timestamp"`
+			RoomTitle    string            `json:"room_title"`
+			Tags         []string          `json:"tags"`
+			Viewers      int               `json:"viewers"`
+			Resolution   string            `json:"resolution"`
+			Framerate    int               `json:"framerate"`
+			Links        map[string]string `json:"links"`
+			ThumbnailURL string            `json:"thumbnail_url"`
+			SpriteURL    string            `json:"sprite_url"`
+			PreviewURL   string            `json:"preview_url"`
+			EmbedURL     string            `json:"embed_url"`
+			Filesize     int64             `json:"filesize"`
+		}
 
-	type ChannelRecordings struct {
-		Gender     string            `json:"gender"`
-		Recordings []RecordingEntry  `json:"recordings"`
-	}
+		type ChannelRecordings struct {
+			Gender     string            `json:"gender"`
+			Recordings []RecordingEntry  `json:"recordings"`
+		}
 
-	type RecordingsDB struct {
-		Version  int                          `json:"version"`
-		Channels map[string]*ChannelRecordings `json:"channels"`
-	}
+		type RecordingsDB struct {
+			Version  int                          `json:"version"`
+			Channels map[string]*ChannelRecordings `json:"channels"`
+		}
 
 	db := RecordingsDB{
 		Version:  2,
@@ -465,6 +467,7 @@ func LoadRecordingsFromDB() []byte {
 			Links:        links,
 			ThumbnailURL: rec.ThumbnailURL,
 			SpriteURL:    rec.SpriteURL,
+			PreviewURL:   rec.PreviewURL,
 			EmbedURL:     rec.EmbedURL,
 			Filesize:     rec.Filesize,
 		}
@@ -485,7 +488,7 @@ func LoadRecordingsFromDB() []byte {
 // SaveRecordingWithLinks saves a recording and its upload links directly to Supabase.
 // Preview URLs should be saved separately via SavePreviewLinks before calling this.
 // This function only saves the recording metadata and upload links.
-func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tags []string, viewers int, resolution string, framerate int, filesize int64, gender, embedURL, thumbnailURL, spriteURL string, links map[string]string) error {
+func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tags []string, viewers int, resolution string, framerate int, filesize int64, gender, embedURL, thumbnailURL, spriteURL, previewURL string, links map[string]string) error {
 	client := GetDBClient()
 	if client == nil {
 		return fmt.Errorf("Supabase not configured")
@@ -506,6 +509,7 @@ func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tag
 		EmbedURL:     embedURL,
 		ThumbnailURL: thumbnailURL,
 		SpriteURL:    spriteURL,
+		PreviewURL:   previewURL,
 	}
 	// Skip channel_id lookup — the channels table is shared across instances
 	// and the FK would point to the wrong instance's row.

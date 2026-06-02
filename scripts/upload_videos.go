@@ -225,7 +225,7 @@ func main() {
 
 		username := extractUsername(filename)
 
-		if err := server.SaveRecordingWithLinks(username, filename, timestamp, "", nil, 0, "", 0, filesize, "", embedURL, thumbURL, spriteURL, links); err != nil {
+		if err := server.SaveRecordingWithLinks(username, filename, timestamp, "", nil, 0, "", 0, filesize, "", embedURL, thumbURL, spriteURL, "", links); err != nil {
 			log.Printf("failed saving metadata for %s: %v", filename, err)
 		} else {
 			log.Printf("saved metadata for %s (links: %d)", filename, len(links))

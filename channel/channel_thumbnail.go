@@ -22,9 +22,9 @@ const (
 	spriteRows    = 4
 	spriteFrameW  = 640
 	spriteFrameH  = 360
-	previewFrames = 16
+	previewFrames = 40
 	previewWidth  = 320
-	previewFPS    = 3
+	previewFPS    = 8
 )
 
 // generateThumbnail is the channel-scoped wrapper — logs go to the channel log.
@@ -195,9 +195,8 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		}
 	}()
 
-	// ── Animated GIF preview (16 frames covering the full video duration) ───
-	// Each frame is 320px wide, 3 fps → ~5.3 s per loop.
-	// Palette-optimized for small file size while maintaining quality.
+	// ── Animated GIF preview (40 frames at 8 fps → 5 s per loop) ──────────
+	// Each frame is 320px wide. Palette-optimized for small file size.
 	// Same 15-minute timeout as the sprite for long videos.
 	go func() {
 		previewCtx, previewCancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -206,11 +205,11 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		previewGIF := videoPath + ".preview.gif"
 		defer os.Remove(previewGIF)
 
-		// fps=1/INTERVAL extracts one frame per interval.
+		// fps=previewFPS gives smooth playback.
 		// scale down to previewWidth, palettegen+paletteuse for optimal GIF.
 		vf := fmt.Sprintf(
-			"fps=1/%.4f,scale=%d:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5",
-			interval,
+			"fps=%d,scale=%d:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5",
+			previewFPS,
 			previewWidth,
 		)
 

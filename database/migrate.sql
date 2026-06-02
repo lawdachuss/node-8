@@ -17,7 +17,7 @@ SET search_path TO public;
 -- gen_random_uuid() is built-in since PostgreSQL 13; no extension needed.
 
 -- ============================================================================
--- 1. CHANNELS TABLE
+-- 1. CHANNELS
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS channels (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -37,7 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_channels_username ON channels(username);
 CREATE INDEX IF NOT EXISTS idx_channels_created_at ON channels(created_at);
 
 -- ============================================================================
--- 2. RECORDINGS TABLE
+-- 2. RECORDINGS
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS recordings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS recordings (
     thumbnail_url TEXT,
     sprite_url TEXT,
     embed_url TEXT,
+    preview_url TEXT,
+    instance_id TEXT NOT NULL DEFAULT 'default',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -64,23 +66,26 @@ CREATE INDEX IF NOT EXISTS idx_recordings_filename ON recordings(filename);
 CREATE INDEX IF NOT EXISTS idx_recordings_timestamp ON recordings(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_recordings_channel_id ON recordings(channel_id);
 CREATE INDEX IF NOT EXISTS idx_recordings_gender ON recordings(gender);
+CREATE INDEX IF NOT EXISTS idx_recordings_instance ON recordings(instance_id);
 
 -- ============================================================================
--- 3. UPLOAD_LINKS TABLE
+-- 3. UPLOAD_LINKS
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS upload_links (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     recording_id UUID REFERENCES recordings(id) ON DELETE CASCADE,
     host VARCHAR(100) NOT NULL,
     url TEXT NOT NULL,
+    instance_id TEXT NOT NULL DEFAULT 'default',
     uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_upload_links_recording_id ON upload_links(recording_id);
 CREATE INDEX IF NOT EXISTS idx_upload_links_host ON upload_links(host);
+CREATE INDEX IF NOT EXISTS idx_upload_links_instance ON upload_links(instance_id);
 
 -- ============================================================================
--- 4. APP_SETTINGS TABLE
+-- 4. APP_SETTINGS
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS app_settings (
     key VARCHAR(255) PRIMARY KEY,
@@ -89,50 +94,41 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 
 -- ============================================================================
--- 5. TUNNELS TABLE (used by Go code)
+-- 5. TUNNELS
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS tunnels (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     url TEXT NOT NULL,
     run_id INTEGER,
     is_active BOOLEAN DEFAULT TRUE,
+    instance_id TEXT NOT NULL DEFAULT 'default',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     expires_at TIMESTAMP WITH TIME ZONE
 );
 
--- Add instance_id column for existing tables (safe re-run)
-ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default';
-ALTER TABLE recordings ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default';
-ALTER TABLE recordings ADD COLUMN IF NOT EXISTS preview_url TEXT;
-ALTER TABLE upload_links ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default';
-
 CREATE INDEX IF NOT EXISTS idx_tunnels_active ON tunnels(is_active, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tunnels_run_id ON tunnels(run_id);
 CREATE INDEX IF NOT EXISTS idx_tunnels_instance ON tunnels(instance_id);
-CREATE INDEX IF NOT EXISTS idx_recordings_instance ON recordings(instance_id);
-CREATE INDEX IF NOT EXISTS idx_upload_links_instance ON upload_links(instance_id);
 
 -- ============================================================================
--- 6. TUNNEL_SESSIONS TABLE (used by GitHub Actions workflow)
+-- 6. TUNNEL_SESSIONS
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS tunnel_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id INTEGER NOT NULL,
     url TEXT NOT NULL,
+    instance_id TEXT NOT NULL DEFAULT 'default',
     started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_seen_at TIMESTAMP WITH TIME ZONE,
     is_active BOOLEAN DEFAULT TRUE
 );
-
--- Add instance_id column for existing tables (safe re-run)
-ALTER TABLE tunnel_sessions ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default';
 
 CREATE INDEX IF NOT EXISTS idx_tunnel_sessions_run ON tunnel_sessions(run_id);
 CREATE INDEX IF NOT EXISTS idx_tunnel_sessions_instance ON tunnel_sessions(instance_id);
 CREATE INDEX IF NOT EXISTS idx_tunnel_sessions_active ON tunnel_sessions(is_active, started_at DESC);
 
 -- ============================================================================
--- 7. CHANNEL_LOGS TABLE
+-- 7. CHANNEL_LOGS
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS channel_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -148,7 +144,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_logs_username ON channel_logs(username, c
 CREATE INDEX IF NOT EXISTS idx_channel_logs_created_at ON channel_logs(created_at DESC);
 
 -- ============================================================================
--- 8. RECORDING_SESSIONS TABLE
+-- 8. RECORDING_SESSIONS
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS recording_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -168,7 +164,7 @@ CREATE INDEX IF NOT EXISTS idx_recording_sessions_username ON recording_sessions
 CREATE INDEX IF NOT EXISTS idx_recording_sessions_started_at ON recording_sessions(started_at DESC);
 
 -- ============================================================================
--- 9. PREVIEW_IMAGES TABLE
+-- 9. PREVIEW_IMAGES
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS preview_images (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -177,19 +173,40 @@ CREATE TABLE IF NOT EXISTS preview_images (
     thumbnail_url TEXT,
     sprite_url TEXT,
     github_path TEXT,
+    preview_url TEXT,
+    instance_id TEXT NOT NULL DEFAULT 'default',
     uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE(filename)
 );
-
-ALTER TABLE preview_images ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default';
-ALTER TABLE preview_images ADD COLUMN IF NOT EXISTS preview_url TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_preview_images_recording_id ON preview_images(recording_id);
 CREATE INDEX IF NOT EXISTS idx_preview_images_filename ON preview_images(filename);
 CREATE INDEX IF NOT EXISTS idx_preview_images_instance ON preview_images(instance_id);
 
 -- ============================================================================
--- 10. DISK_USAGE TABLE
+-- 10. UPLOAD_JOURNAL
+-- ============================================================================
+-- Tracks per-host upload state for crash recovery. On restart the app queries
+-- this table to determine which hosts already received a given file.
+CREATE TABLE IF NOT EXISTS upload_journal (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    file_hash TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    host TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_msg TEXT,
+    file_size BIGINT,
+    instance_id TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(file_hash, host)
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_journal_hash ON upload_journal(file_hash);
+CREATE INDEX IF NOT EXISTS idx_upload_journal_status ON upload_journal(status);
+
+-- ============================================================================
+-- 11. DISK_USAGE
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS disk_usage (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -236,9 +253,10 @@ ALTER TABLE tunnel_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE recording_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE preview_images ENABLE ROW LEVEL SECURITY;
+ALTER TABLE upload_journal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE disk_usage ENABLE ROW LEVEL SECURITY;
 
--- Drop existing policies if they already exist (safe re-run)
+-- Drop existing policies before recreating (safe re-run)
 DO $$
 DECLARE
     pol RECORD;
@@ -249,7 +267,7 @@ BEGIN
         WHERE schemaname = 'public'
           AND tablename IN ('channels', 'recordings', 'upload_links', 'app_settings',
                             'tunnels', 'tunnel_sessions', 'channel_logs',
-                            'recording_sessions', 'preview_images', 'disk_usage')
+                            'recording_sessions', 'preview_images', 'upload_journal', 'disk_usage')
     LOOP
         EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, pol.tablename);
     END LOOP;
@@ -257,39 +275,31 @@ END $$;
 
 CREATE POLICY "Allow all operations on channels" ON channels
     FOR ALL USING (true) WITH CHECK (true);
-
 CREATE POLICY "Allow all operations on recordings" ON recordings
     FOR ALL USING (true) WITH CHECK (true);
-
 CREATE POLICY "Allow all operations on upload_links" ON upload_links
     FOR ALL USING (true) WITH CHECK (true);
-
 CREATE POLICY "Allow all operations on app_settings" ON app_settings
     FOR ALL USING (true) WITH CHECK (true);
-
 CREATE POLICY "Allow all operations on tunnels" ON tunnels
     FOR ALL USING (true) WITH CHECK (true);
-
 CREATE POLICY "Allow all operations on tunnel_sessions" ON tunnel_sessions
     FOR ALL USING (true) WITH CHECK (true);
-
 CREATE POLICY "Allow all operations on channel_logs" ON channel_logs
     FOR ALL USING (true) WITH CHECK (true);
-
 CREATE POLICY "Allow all operations on recording_sessions" ON recording_sessions
     FOR ALL USING (true) WITH CHECK (true);
-
 CREATE POLICY "Allow all operations on preview_images" ON preview_images
     FOR ALL USING (true) WITH CHECK (true);
-
+CREATE POLICY "Allow all operations on upload_journal" ON upload_journal
+    FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all operations on disk_usage" ON disk_usage
     FOR ALL USING (true) WITH CHECK (true);
 
 -- ============================================================================
 -- VIEWS
 -- ============================================================================
--- Explicitly use SECURITY INVOKER so views respect the querying user's
--- permissions and RLS policies instead of the view creator's.
+-- Use SECURITY INVOKER so views respect the querying user's RLS policies.
 
 CREATE OR REPLACE VIEW recordings_with_links WITH (security_invoker = true) AS
 SELECT 
@@ -351,23 +361,10 @@ ON CONFLICT (key) DO NOTHING;
 -- PERMISSIONS
 -- ============================================================================
 
--- Grant schema-level access to anon role
 GRANT USAGE ON SCHEMA public TO anon;
 GRANT CREATE ON SCHEMA public TO anon;
 
--- Grant table-level access
-GRANT ALL ON public.channels TO anon;
-GRANT ALL ON public.recordings TO anon;
-GRANT ALL ON public.upload_links TO anon;
-GRANT ALL ON public.app_settings TO anon;
-GRANT ALL ON public.tunnels TO anon;
-GRANT ALL ON public.tunnel_sessions TO anon;
-GRANT ALL ON public.channel_logs TO anon;
-GRANT ALL ON public.recording_sessions TO anon;
-GRANT ALL ON public.preview_images TO anon;
-GRANT ALL ON public.disk_usage TO anon;
-
--- Transfer ownership to anon (bypasses RLS for the service role, ensures anon can write)
+GRANT ALL ON ALL TABLES IN SCHEMA public TO anon;
 ALTER TABLE public.channels OWNER TO anon;
 ALTER TABLE public.recordings OWNER TO anon;
 ALTER TABLE public.upload_links OWNER TO anon;
@@ -377,28 +374,15 @@ ALTER TABLE public.tunnel_sessions OWNER TO anon;
 ALTER TABLE public.channel_logs OWNER TO anon;
 ALTER TABLE public.recording_sessions OWNER TO anon;
 ALTER TABLE public.preview_images OWNER TO anon;
+ALTER TABLE public.upload_journal OWNER TO anon;
 ALTER TABLE public.disk_usage OWNER TO anon;
 
--- Grant sequence usage for auto-increment UUIDs
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon;
 
--- Grant view access
 GRANT SELECT ON public.recordings_with_links TO anon;
 GRANT SELECT ON public.channel_statistics TO anon;
 GRANT SELECT ON public.recent_activity TO anon;
+
 ALTER VIEW public.recordings_with_links OWNER TO anon;
 ALTER VIEW public.channel_statistics OWNER TO anon;
 ALTER VIEW public.recent_activity OWNER TO anon;
-
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon;
-
--- ============================================================================
--- MIGRATION COMPLETE
--- ============================================================================
--- Next steps:
--- 1. Set INSTANCE_ID env var in each fork's .github/workflows/recorder.yml
---    (e.g., "a" for main, "b" for fork 2, "c" for fork 3)
--- 2. Each fork reads/writes only its own channels_<instance_id> blob
--- 3. Tunnels and tunnel_sessions are isolated per instance
--- 4. Recordings, uploads, previews, and cookies are shared across all instances
--- ============================================================================

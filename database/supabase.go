@@ -265,6 +265,7 @@ type Recording struct {
 	Gender       string   `json:"gender,omitempty"`
 	ThumbnailURL string   `json:"thumbnail_url,omitempty"`
 	SpriteURL    string   `json:"sprite_url,omitempty"`
+	PreviewURL   string   `json:"preview_url,omitempty"`
 	EmbedURL     string   `json:"embed_url,omitempty"`
 	InstanceID   string   `json:"instance_id,omitempty"`
 	CreatedAt    string   `json:"created_at,omitempty"`

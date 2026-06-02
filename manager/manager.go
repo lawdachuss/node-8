@@ -228,9 +228,9 @@ func (m *Manager) ScanThumbnails() {
 			if strings.Contains(info.Name(), ".video.") || strings.Contains(info.Name(), ".audio.") {
 				return nil
 			}
-			// Only process files that are missing preview URLs in Supabase
-			thumbURL, spriteURL, _ := server.LoadPreviewLinks(info.Name())
-			if thumbURL != "" && spriteURL != "" {
+			// Only process files that are missing any preview URLs in Supabase
+			thumbURL, spriteURL, previewURL := server.LoadPreviewLinks(info.Name())
+			if thumbURL != "" && spriteURL != "" && previewURL != "" {
 				return nil
 			}
 			newThumb, newSprite, newPreview := channel.GenerateThumbnailForFile(path)

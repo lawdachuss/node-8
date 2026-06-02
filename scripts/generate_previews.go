@@ -402,23 +402,24 @@ func main() {
 		}
 
 		log.Printf("  generating thumbnails for %s...", localPath)
-		thumbURL, spriteURL := channel.GenerateThumbnailForFile(localPath)
+		thumbURL, spriteURL, previewURL := channel.GenerateThumbnailForFile(localPath)
 
-		if thumbURL == "" && spriteURL == "" {
+		if thumbURL == "" && spriteURL == "" && previewURL == "" {
 			log.Printf("  WARN: thumbnail generation returned empty URLs")
 			os.Remove(localPath)
 			continue
 		}
 		log.Printf("  thumb: %s", thumbURL)
 		log.Printf("  sprite: %s", spriteURL)
+		log.Printf("  preview: %s", previewURL)
 
 		log.Printf("  saving to preview_images table...")
-		if err := server.SavePreviewLinks(r.Filename, thumbURL, spriteURL, ""); err != nil {
+		if err := server.SavePreviewLinks(r.Filename, thumbURL, spriteURL, previewURL); err != nil {
 			log.Printf("  WARN: SavePreviewLinks failed: %v", err)
 		}
 
 		log.Printf("  updating recordings table...")
-		if err := server.UpdateRecordingThumbnails(r.Filename, thumbURL, spriteURL, ""); err != nil {
+		if err := server.UpdateRecordingThumbnails(r.Filename, thumbURL, spriteURL, previewURL); err != nil {
 			log.Printf("  WARN: UpdateRecordingThumbnails failed: %v", err)
 		}
 
