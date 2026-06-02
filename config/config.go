@@ -145,25 +145,8 @@ func ReleaseFFmpeg() {
 	<-ffmpegSem
 }
 
-// HasFFmpeg checks if ffmpeg is available.
-func HasFFmpeg() bool {
-	bin := ffmpegBin()
-	// If we have a full path, check it directly.
-	if bin != "ffmpeg" {
-		_, err := os.Stat(bin)
-		return err == nil
-	}
-	_, err := exec.LookPath("ffmpeg")
-	return err == nil
-}
-
-// New initializes a new Config struct with values from the CLI context.
 func New(c *cli.Context) (*entity.Config, error) {
-	// Auto-enable compress if ffmpeg is available and user didn't explicitly set --compress=false
 	compress := c.Bool("compress")
-	if !c.IsSet("compress") && HasFFmpeg() {
-		compress = true
-	}
 
 	cfg := &entity.Config{
 		Version:                c.App.Version,

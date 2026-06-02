@@ -94,7 +94,7 @@ func main() {
 			&cli.IntFlag{
 				Name:  "framerate",
 				Usage: "Desired framerate (FPS)",
-				Value: 30,
+				Value: 60,
 			},
 			&cli.IntFlag{
 				Name:  "resolution",
