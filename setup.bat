@@ -132,7 +132,8 @@ if defined ffmpegDir (
 
 for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "MachinePath=%%b"
 for /f "tokens=2*" %%a in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "UserPath=%%b"
-set "PATH=%MachinePath%;%UserPath%"
+set "PATH=%MachinePath%;%UserPath%;%ffmpegDir%"
+echo   [OK] ffmpeg added to current session PATH
 
 REM -- 3. Install cloudflared --
 echo [3/7] Installing cloudflared...
@@ -204,11 +205,11 @@ echo.
 
 if not defined NoAppStart (
     echo Starting chaturbate-dvr in a new window...
-    start "chaturbate-dvr" "%ProjectDir%\chaturbate-dvr.exe" --no-tunnel
+    start "chaturbate-dvr" cmd /k "set PATH=%PATH% && cd /d "%ProjectDir%" && chaturbate-dvr.exe --no-tunnel"
     timeout /t 2 /nobreak >nul
 
     echo Starting Cloudflare tunnel in a new window...
-    start "Cloudflare Tunnel" cmd /k "cloudflared tunnel --url http://localhost:8080 --protocol http2"
+    start "Cloudflare Tunnel" cmd /k "set PATH=%PATH% && cloudflared tunnel --url http://localhost:8080 --protocol http2"
 
     echo.
     echo   DVR:     http://localhost:8080
