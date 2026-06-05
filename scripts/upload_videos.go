@@ -71,7 +71,6 @@ func loadDotEnv(path string) error {
 		k := strings.TrimSpace(parts[0])
 		v := strings.TrimSpace(parts[1])
 		// strip optional surrounding quotes
-		v = strings.Trim(v, "\"")
 		v = strings.Trim(v, "'\"")
 		if os.Getenv(k) == "" {
 			os.Setenv(k, v)
@@ -169,7 +168,7 @@ func main() {
 		// Skip if already in DB
 		if dbClient != nil {
 			if _, err := dbClient.GetRecording(filename); err == nil {
-				log.Printf("skipping %s — already present in Supabase", filename)
+				log.Printf("skipping %s \u2014 already present in Supabase", filename)
 				continue
 			}
 		}

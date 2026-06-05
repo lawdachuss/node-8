@@ -246,10 +246,32 @@ func muxOutputLooksValid(outputPath string, _ /*videoInfo*/, _ /*audioInfo*/ os.
         return true, ""
 }
 
+// videoExt returns true if the extension is a known video extension.
+func videoExt(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".mp4" || ext == ".mkv"
+}
+
+// isSidecar returns true if the filename appears to be a sidecar/preview file.
+// Note: .video.muxed.mp4 is the final muxed output (not a sidecar), while
+// .video.mp4 and .audio.mp4 are raw A/V track files (sidecars).
+func isSidecar(name string) bool {
+	return strings.HasSuffix(name, ".thumb.jpg") ||
+		strings.HasSuffix(name, ".sprite.jpg") ||
+		strings.HasSuffix(name, ".thumb") ||
+		strings.HasSuffix(name, ".sprite") ||
+		strings.HasSuffix(name, ".video.mp4") ||
+		strings.HasSuffix(name, ".audio.mp4")
+}
+
 // MoveToOutputDir relocates a finalized recording into server.Config.OutputDir.
 // Errors are non-fatal: the recording is already safely written at srcPath.
 func (ch *Channel) MoveToOutputDir(srcPath string) string {
 	triggerUpload := func(filePath string) {
+		base := filepath.Base(filePath)
+		if !videoExt(base) || isSidecar(base) {
+			return
+		}
 		MarkUploadInFlight(filePath)
 		ch.UploadWg.Add(1)
 		go func() {

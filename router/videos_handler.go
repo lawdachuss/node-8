@@ -183,9 +183,8 @@ func ChannelVideos(c *gin.Context) {
 }
 
 var videoExts = map[string]bool{
-        ".ts":  true,
-        ".mp4": true,
-        ".mkv": true,
+	".mp4": true,
+	".mkv": true,
 }
 
 func scanVideos() []*VideoEntry {
@@ -335,7 +334,7 @@ func walkDir(dir string, previewLinks map[string][3]string) []*VideoEntry {
                 if !videoExts[ext] {
                         continue
                 }
-                if strings.Contains(item.Name(), ".video.") || strings.Contains(item.Name(), ".audio.") {
+                if strings.HasSuffix(item.Name(), ".video.mp4") || strings.HasSuffix(item.Name(), ".audio.mp4") {
                         continue
                 }
 

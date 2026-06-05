@@ -240,8 +240,8 @@ func (m *Manager) ScanThumbnails() {
 			if !videoExts[ext] {
 				return nil
 			}
-			// Skip segment sidecars
-			if strings.Contains(info.Name(), ".video.") || strings.Contains(info.Name(), ".audio.") {
+			// Skip A/V track sidecars (but keep .video.muxed.mp4 which is the final muxed output)
+			if strings.HasSuffix(info.Name(), ".video.mp4") || strings.HasSuffix(info.Name(), ".audio.mp4") {
 				return nil
 			}
 			// Only process files that are missing any preview URLs in Supabase

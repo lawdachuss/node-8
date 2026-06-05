@@ -118,19 +118,20 @@ func ffmpegBin() string {
 // ffprobeBin returns the configured ffprobe path by deriving it from ffmpeg
 // path, or "ffprobe" (or "ffprobe.exe" on Windows) as fallback.
 func ffprobeBin() string {
+	probeName := "ffprobe"
+	if runtime.GOOS == "windows" {
+		probeName = "ffprobe.exe"
+	}
 	if ffmpegPath != "" {
 		dir := filepath.Dir(ffmpegPath)
-		return filepath.Join(dir, "ffprobe")
+		return filepath.Join(dir, probeName)
 	}
 	// If auto-detected, derive ffprobe from the same directory
 	if p := autoDetectFFmpeg(); p != "" {
 		dir := filepath.Dir(p)
-		return filepath.Join(dir, "ffprobe")
+		return filepath.Join(dir, probeName)
 	}
-	if runtime.GOOS == "windows" {
-		return "ffprobe.exe"
-	}
-	return "ffprobe"
+	return probeName
 }
 
 // FFmpegCommand returns an exec.Cmd that runs ffmpeg with the given arguments.

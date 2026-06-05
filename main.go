@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,7 +24,10 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-var tunnelCancel context.CancelFunc
+var tunnelCancel atomic.Value
+
+// diskMonitorStop is closed during graceful shutdown to stop the background disk monitor.
+var diskMonitorStop = make(chan struct{})
 
 const logo = `
  ██████╗██╗  ██╗ █████╗ ████████╗██╗   ██╗██████╗ ██████╗  █████╗ ████████╗███████╗
@@ -398,8 +402,9 @@ func start(c *cli.Context) error {
 			server.Manager.WaitForUploads()
 			close(shutdownDone)
 			fmt.Println("[SHUTDOWN] all uploads and Supabase saves complete — exiting cleanly")
-			if tunnelCancel != nil {
-				tunnelCancel()
+			close(diskMonitorStop)
+			if c, ok := tunnelCancel.Load().(context.CancelFunc); ok && c != nil {
+				c()
 			}
 			done <- struct{}{}
 		}()
@@ -429,14 +434,14 @@ func start(c *cli.Context) error {
 		server.Manager.StartSession(server.Config.SessionDurationParsed)
 
 		// Start background disk monitor
-		go server.StartDiskMonitor(make(chan struct{}))
+		go server.StartDiskMonitor(diskMonitorStop)
 
 		return router.SetupRouter().Run(":" + c.String("port"))
 	}
 
 	// else create a channel with the provided username
 	channel.CleanupOrphanedFiles()
-	go server.StartDiskMonitor(make(chan struct{}))
+	go server.StartDiskMonitor(diskMonitorStop)
 
 	if err := server.Manager.CreateChannel(&entity.ChannelConfig{
 		Username:    c.String("username"),
@@ -464,7 +469,7 @@ func startTunnel(port string) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tunnelCancel = cancel
+	tunnelCancel.Store(cancel)
 
 	cmd := exec.CommandContext(ctx, cloudflaredPath, "tunnel", "--url", "http://localhost:"+port, "--protocol", "http2")
 
@@ -476,7 +481,7 @@ func startTunnel(port string) {
 
 	if err := cmd.Start(); err != nil {
 		fmt.Printf("⚠️  tunnel: %v\n", err)
-		tunnelCancel = nil
+		tunnelCancel.Store(context.CancelFunc(nil))
 		return
 	}
 

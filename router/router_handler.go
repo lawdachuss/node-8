@@ -418,27 +418,27 @@ func detectVideoMIME(path string) string {
 
 // VideoDetail renders the video detail page with an embedded player.
 func VideoDetail(c *gin.Context) {
-        path := c.Query("path")
-        if path == "" {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
-        abs, err := filepath.Abs(path)
-        if err != nil {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
-        if !isPathAllowed(abs) {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
+	path := c.Query("path")
+	if path == "" {
+		c.Redirect(http.StatusFound, "/videos")
+		return
+	}
 
-        filename := filepath.Base(abs)
-        username := extractUsername(filename)
+	filename := filepath.Base(path)
+	username := extractUsername(filename)
+	abs := ""
+	fileOnDisk := false
+	var stat os.FileInfo
 
-        // Check if file still exists on disk
-        stat, statErr := os.Stat(abs)
-        fileOnDisk := statErr == nil
+	// Try to resolve as a file path. For uploaded-only recordings the path
+	// is just a filename, which won't pass isPathAllowed — we fall through
+	// to the DB lookup below.
+	if resolved, err := filepath.Abs(path); err == nil && isPathAllowed(resolved) {
+		abs = resolved
+		var statErr error
+		stat, statErr = os.Stat(abs)
+		fileOnDisk = statErr == nil
+	}
 
 	// Load preview URLs from Supabase
 	thumbURL, spriteURL, previewURL := server.LoadPreviewLinks(filename)

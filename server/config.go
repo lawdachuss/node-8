@@ -1,4 +1,4 @@
-package server
+﻿package server
 
 import (
         "encoding/json"
@@ -11,7 +11,6 @@ import (
 
 var Config *entity.Config
 var ConfigMu sync.RWMutex
-var configMu = &ConfigMu // alias for internal use
 
 type persistedSettings struct {
 	Cookies         string `json:"cookies"`
@@ -128,7 +127,7 @@ func extractCookie(cookieStr, name string) string {
 // UpdateUploaderCredentials updates upload service credentials (Streamtape, Mixdrop)
 // and protects concurrent access with a mutex.
 func UpdateUploaderCredentials(streamtapeLogin, streamtapeKey, mixdropEmail, mixdropToken, pixeldrainToken string) {
-	configMu.Lock()
+	ConfigMu.Lock()
 	if streamtapeLogin != "" {
 		Config.StreamtapeLogin = streamtapeLogin
 	}
@@ -144,5 +143,5 @@ func UpdateUploaderCredentials(streamtapeLogin, streamtapeKey, mixdropEmail, mix
 	if pixeldrainToken != "" {
 		Config.PixelDrainToken = pixeldrainToken
 	}
-	configMu.Unlock()
+	ConfigMu.Unlock()
 }

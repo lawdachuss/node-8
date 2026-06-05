@@ -51,6 +51,7 @@ type recordingRow struct {
 	Username     string `json:"username"`
 	ThumbnailURL string `json:"thumbnail_url"`
 	SpriteURL    string `json:"sprite_url"`
+	PreviewURL   string `json:"preview_url"`
 }
 
 type uploadLinkRow struct {
@@ -62,6 +63,7 @@ type previewRow struct {
 	Filename     string `json:"filename"`
 	ThumbnailURL string `json:"thumbnail_url"`
 	SpriteURL    string `json:"sprite_url"`
+	PreviewURL   string `json:"preview_url"`
 }
 
 func supabaseGet(path string) ([]byte, error) {

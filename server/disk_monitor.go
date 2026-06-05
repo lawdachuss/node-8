@@ -132,7 +132,7 @@ func freeDiskSpace(targetPercent, currentPercent int) (int, error) {
 			if ext != ".mp4" && ext != ".mkv" {
 				continue
 			}
-			if strings.Contains(name, ".video.") || strings.Contains(name, ".audio.") || strings.Contains(name, ".muxed.") {
+			if strings.HasSuffix(name, ".video.mp4") || strings.HasSuffix(name, ".audio.mp4") || strings.Contains(name, ".muxed.") {
 				continue
 			}
 
@@ -205,6 +205,10 @@ func freeDiskSpace(targetPercent, currentPercent int) (int, error) {
 			log.Printf("[DISK] failed to delete %s: %v", vf.path, err)
 			continue
 		}
+		// Clean up associated preview sidecar files
+		for _, s := range []string{".thumb.jpg", ".sprite.jpg", ".thumb", ".sprite"} {
+			os.Remove(vf.path + s)
+		}
 		freed += vf.size
 		deleted++
 		log.Printf("[DISK] deleted %s (age: %s, size: %.1f MB)",
@@ -248,7 +252,7 @@ func deleteOldLocalFiles(maxAgeDays int) (int, error) {
 			if ext != ".mp4" && ext != ".mkv" {
 				continue
 			}
-			if strings.Contains(name, ".video.") || strings.Contains(name, ".audio.") || strings.Contains(name, ".muxed.") {
+			if strings.HasSuffix(name, ".video.mp4") || strings.HasSuffix(name, ".audio.mp4") || strings.Contains(name, ".muxed.") {
 				continue
 			}
 
@@ -272,6 +276,10 @@ func deleteOldLocalFiles(maxAgeDays int) (int, error) {
 			if err := os.Remove(path); err != nil {
 				log.Printf("[DISK] age-cleanup: failed to delete %s: %v", path, err)
 				continue
+			}
+			// Clean up associated preview sidecar files
+			for _, s := range []string{".thumb.jpg", ".sprite.jpg", ".thumb", ".sprite"} {
+				os.Remove(path + s)
 			}
 			deleted++
 			log.Printf("[DISK] age-cleanup: deleted %s (age: %s, size: %.1f MB)",
