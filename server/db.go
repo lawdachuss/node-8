@@ -603,6 +603,34 @@ func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tag
 	return nil
 }
 
+// SaveRecordingBasics saves minimal recording metadata before upload starts.
+// This ensures the recording is never lost even if the process is killed
+// during upload. The full metadata (thumbnails, upload links) is saved
+// later by stageSaveMetadata via the upsert on filename.
+func SaveRecordingBasics(username, filename, timestamp, roomTitle string, tags []string, viewers int, gender, resolution string, framerate int, filesize int64, duration float64) error {
+	client := GetDBClient()
+	if client == nil {
+		return fmt.Errorf("Supabase not configured")
+	}
+	rec := &database.Recording{
+		Username:   username,
+		Filename:   filename,
+		Timestamp:  timestamp,
+		RoomTitle:  roomTitle,
+		Tags:       tags,
+		Viewers:    viewers,
+		Gender:     gender,
+		Resolution: resolution,
+		Framerate:  framerate,
+		Filesize:   filesize,
+		Duration:   duration,
+	}
+	if err := client.SaveRecording(rec); err != nil {
+		return err
+	}
+	return nil
+}
+
 // ─── Pipeline States ──────────────────────────────────────────────────────────
 
 // SavePipelineState persists the current pipeline state for crash recovery.

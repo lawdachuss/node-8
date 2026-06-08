@@ -910,14 +910,16 @@ type thumbCacheEntry struct {
 	expiresAt time.Time
 }
 
-// ServeLiveThumb serves a live thumbnail for a channel.  It tries to extract a
-// frame from the most recent recording file (a true stream snapshot, like
-// Chaturbate's ri/{username}.jpg).  Falls back to the upstream CDN preview URL
-// if no recording file is available.
+// ServeLiveThumb serves a live thumbnail for a channel.  It always tries to
+// extract a frame from the most recent recording file first (like Chaturbate's
+// ri/{username}.jpg).  Falls back to the upstream CDN preview URL if no
+// recording file is available or ffmpeg extraction fails.
+// Cache TTL is kept short (2s ffmpeg, 5s CDN) so the frontend sees near-live
+// updates while the stream is active.
 func ServeLiveThumb(c *gin.Context) {
 	username := c.Param("username")
 
-	// Check cache first.
+	// Check cache first — 2s for ffmpeg frames, 5s for CDN proxy.
 	thumbCacheMu.Lock()
 	entry, cached := thumbCache[username]
 	thumbCacheMu.Unlock()
@@ -926,8 +928,7 @@ func ServeLiveThumb(c *gin.Context) {
 		return
 	}
 
-	// Try to extract a frame from the most recent recording file.
-	// Stripchat LL-HLS recordings with separate audio use .video.mp4 suffix.
+	// Find the most recent recording file.
 	videoDir := server.Config.OutputDir
 	if videoDir == "" {
 		videoDir = "videos"
@@ -951,28 +952,52 @@ func ServeLiveThumb(c *gin.Context) {
 		}
 	}
 
-	// Only extract from files being actively recorded (< 60s since last write).
-	// Try -ss first (most reliable for in-progress fMP4), then sseof fallback.
-	if newest != "" && time.Since(newestMod) < 60*time.Second {
+	if newest != "" {
 		cachePath := filepath.Join(os.TempDir(), "opencode-thumb-"+username+".jpg")
 		var thumbOK bool
 
-		for attempt := 0; attempt < 2; attempt++ {
+		// Try up to 3 approaches:
+		// 0 — fragmented MP4 demuxer (works for in-progress fMP4 without moov atom)
+		// 1 — no special flags (standard MOV demuxer, works for completed files)
+		// 2 — seek near the end (avoid blank first frame in completed files)
+		for attempt := 0; attempt < 3 && !thumbOK; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			config.AcquireFFmpeg()
 			args := []string{"-y"}
-			if attempt == 0 {
-				args = append(args, "-ss", "00:00:00")
-			} else {
-				args = append(args, "-sseof", "-3")
+			switch attempt {
+			case 0:
+				// Fragmented MP4 input: force MP4 demuxer, generate PTS.
+				// This handles in-progress fMP4 files where moov atom is
+				// not yet written (written at end when recording finishes).
+				args = append(args,
+					"-f", "mp4",
+					"-flags", "+genpts",
+					"-i", newest,
+					"-vframes", "1",
+					"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+					"-q:v", "2",
+					cachePath,
+				)
+			case 1:
+				// Standard MOV demuxer—no seeking, reads from start.
+				args = append(args,
+					"-i", newest,
+					"-vframes", "1",
+					"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+					"-q:v", "2",
+					cachePath,
+				)
+			case 2:
+				// Seek near the end (only useful for completed files).
+				args = append(args,
+					"-sseof", "-3",
+					"-i", newest,
+					"-vframes", "1",
+					"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+					"-q:v", "2",
+					cachePath,
+				)
 			}
-			args = append(args,
-				"-i", newest,
-				"-vframes", "1",
-				"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-				"-q:v", "2",
-				cachePath,
-			)
 			err := config.FFmpegCommandContext(ctx, args...).Run()
 			config.ReleaseFFmpeg()
 			cancel()
@@ -982,10 +1007,11 @@ func ServeLiveThumb(c *gin.Context) {
 					thumbOK = true
 					ct := http.DetectContentType(data)
 					thumbCacheMu.Lock()
-					thumbCache[username] = thumbCacheEntry{data: data, contentType: ct, expiresAt: time.Now().Add(5 * time.Second)}
+					// Short TTL (2s) so the frontend gets near-live updates
+					// while the stream is being recorded.
+					thumbCache[username] = thumbCacheEntry{data: data, contentType: ct, expiresAt: time.Now().Add(2 * time.Second)}
 					thumbCacheMu.Unlock()
 					c.Data(http.StatusOK, ct, data)
-					break
 				}
 			}
 		}
@@ -1019,7 +1045,7 @@ func ServeLiveThumb(c *gin.Context) {
 
 	ct := http.DetectContentType(data)
 	thumbCacheMu.Lock()
-	thumbCache[username] = thumbCacheEntry{data: data, contentType: ct, expiresAt: time.Now().Add(30 * time.Second)}
+	thumbCache[username] = thumbCacheEntry{data: data, contentType: ct, expiresAt: time.Now().Add(5 * time.Second)}
 	thumbCacheMu.Unlock()
 	c.Data(http.StatusOK, ct, data)
 }

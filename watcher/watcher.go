@@ -222,6 +222,12 @@ func (fw *FileWatcher) processFile(filePath string) {
 
 	log.Printf("[watcher] processing new file %s", base)
 
+	// If min-duration is enabled, check threshold before uploading
+	if channel.MaybeDeferToPending(filePath) {
+		log.Printf("[watcher] %s deferred to pending (below min-duration threshold)", base)
+		return
+	}
+
 	// Generate thumbnails and upload
 	thumbURL, spriteURL, previewURL := channel.GenerateThumbnailForFile(filePath)
 	if !channel.UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL) {

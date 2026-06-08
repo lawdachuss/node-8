@@ -211,6 +211,47 @@ func (m *MultiHostUploader) UploadSelected(filePath string, hosts []string) []Up
 	return results
 }
 
+// UploadSelectedPriority uploads to the priority host first (sequentially),
+// then to remaining hosts in parallel. This ensures the priority host gets
+// full bandwidth during shutdown when time is limited.
+func (m *MultiHostUploader) UploadSelectedPriority(filePath string, hosts []string, priorityHost string) []UploadResult {
+	m.initHosts()
+
+	var priorityHosts []string
+	var otherHosts []string
+	for _, host := range hosts {
+		if host == priorityHost {
+			priorityHosts = append(priorityHosts, host)
+		} else {
+			otherHosts = append(otherHosts, host)
+		}
+	}
+
+	var results []UploadResult
+
+	for _, host := range priorityHosts {
+		fn, ok := m.hosts[host]
+		if !ok {
+			continue
+		}
+		m.log.Info("upload: priority upload to %s for %s", host, filePath)
+		link, err := fn(filePath, m.progress)
+		results = append(results, UploadResult{Host: host, DownloadLink: link, Error: err})
+		if err != nil {
+			m.log.Error("upload: %s (priority) failed for %s: %v", host, filePath, err)
+		} else {
+			m.log.Info("upload: %s (priority) successful for %s: %s", host, filePath, link)
+		}
+	}
+
+	if len(otherHosts) > 0 {
+		otherResults := m.UploadSelected(filePath, otherHosts)
+		results = append(results, otherResults...)
+	}
+
+	return results
+}
+
 // AvailableHosts returns the names of all configured upload hosts.
 func (m *MultiHostUploader) AvailableHosts() []string {
 	m.initHosts()

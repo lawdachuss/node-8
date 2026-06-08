@@ -317,7 +317,10 @@ func (p *Pipeline) stageUploadVideos(ch *Channel) error {
 			break
 		}
 		var attemptResults []uploader.UploadResult
-		attemptResults = upl.UploadSelected(filePath, hostsToTry)
+		// Phase 3: Upload PixelDrain first so it gets full bandwidth during
+		// shutdown. If the process is killed mid-upload, PixelDrain is most
+		// likely to have completed.
+		attemptResults = upl.UploadSelectedPriority(filePath, hostsToTry, "PixelDrain")
 		results = append(results, attemptResults...)
 
 		success = uploader.GetSuccessfulUploads(results)
@@ -397,6 +400,19 @@ func (p *Pipeline) stageUploadVideos(ch *Channel) error {
 
 // stageSaveMetadata persists recording metadata and all links to Supabase.
 func (p *Pipeline) stageSaveMetadata(ch *Channel) error {
+	// Retry thumbnail generation if it failed during StageThumbnailUpload.
+	if p.ThumbURL == "" && p.SpriteURL == "" && p.PreviewURL == "" {
+		thumbURL, spriteURL, previewURL := ch.generateThumbnail(p.FilePath)
+		if thumbURL != "" || spriteURL != "" || previewURL != "" {
+			p.ThumbURL = thumbURL
+			p.SpriteURL = spriteURL
+			p.PreviewURL = previewURL
+			ch.Info("upload: generated thumbnails for %s (retry)", p.Filename)
+		} else {
+			ch.Warn("upload: thumbnail generation failed for %s (skipped)", p.Filename)
+		}
+	}
+
 	if p.ThumbURL != "" || p.SpriteURL != "" || p.PreviewURL != "" {
 		if err := server.SavePreviewLinks(p.Filename, p.ThumbURL, p.SpriteURL, p.PreviewURL); err != nil {
 			ch.Error("upload: could not save preview links for %s: %v", p.Filename, err)
@@ -697,6 +713,13 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					ch.Error("pipeline: upload goroutine panicked for %s: %v", filename, r)
+					uploadErr = fmt.Errorf("upload panic: %v", r)
+					<-UploadSem
+				}
+			}()
 			UploadSem <- struct{}{}
 			uploadErr = p.stageUploadVideos(ch)
 			<-UploadSem
@@ -779,14 +802,21 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 		pq.ch.Warn("pipeline: could not hash %s (state persistence limited): %v", base, hashErr)
 	}
 
+	// Phase 2: When hashing fails, use a deterministic fallback key so
+	// pipeline state can still be persisted and recovered.
+	if fileHash == "" {
+		fileHash = "fallback-" + base
+	}
+
 	var fileSize int64
 	if stat, err := os.Stat(filePath); err == nil {
 		fileSize = stat.Size()
 	}
 
-	// If the pipeline queue has already stopped (graceful shutdown), save the
-	// pipeline state for recovery on next start instead of enqueuing.  This
-	// prevents UploadWg leaking when EnqueueFile races with Stop().
+	pq.startOnce()
+
+	// Under lock: check stopped, track upload, create pipeline, enqueue — atomic.
+	// This prevents Stop() from racing between the stopped check and add-to-queue.
 	pq.mu.Lock()
 	if pq.stopped {
 		pq.mu.Unlock()
@@ -798,13 +828,11 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 		MarkUploadDone(filePath)
 		return
 	}
-	pq.mu.Unlock()
 
 	pq.ch.UploadWg.Add(1)
 	p := newPipeline(filePath, fileHash, base, pq.ch.Config.Username, fileSize)
 
-	// Snapshot channel metadata at enqueue time so stageSaveMetadata uses
-	// the state from when this file was recorded, not from a newer session.
+	// Snapshot channel metadata under stateMu, then pq.mu — safe lock ordering.
 	pq.ch.stateMu.Lock()
 	p.RoomTitle = pq.ch.RoomTitle
 	p.Tags = append([]string{}, pq.ch.Tags...)
@@ -812,9 +840,46 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 	p.Gender = pq.ch.Gender
 	p.Resolution = pq.ch.Resolution
 	p.Framerate = pq.ch.Framerate
+	roomTitle := p.RoomTitle
+	tags := make([]string, len(p.Tags))
+	copy(tags, p.Tags)
+	viewers := p.Viewers
+	gender := p.Gender
+	resolution := p.Resolution
+	framerate := p.Framerate
 	pq.ch.stateMu.Unlock()
 
-	pq.Enqueue(p)
+	pq.pipelines = append(pq.pipelines, p)
+	pq.mu.Unlock()
+	pq.cond.Signal()
+
+	// Phase 1: Save basic recording metadata immediately so it's never lost
+	// even if the process is killed during upload. stageSaveMetadata later
+	// overwrites this with full data (thumbnails, upload links) via upsert.
+	timestamp := extractTimestampFromFilename(base)
+	if timestamp == "" {
+		if st, statErr := os.Stat(filePath); statErr == nil {
+			timestamp = st.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+		} else {
+			timestamp = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+		}
+	}
+	dur, _ := VideoDurationSeconds(filePath)
+	if saveErr := server.SaveRecordingBasics(
+		pq.ch.Config.Username, base, timestamp,
+		roomTitle, tags, viewers,
+		gender, resolution, framerate,
+		fileSize, dur,
+	); saveErr != nil {
+		pq.ch.Warn("pipeline: could not save early metadata for %s: %v", base, saveErr)
+	} else {
+		pq.ch.Info("pipeline: saved early metadata for %s", base)
+	}
+
+	// Persist initial state for crash recovery (best-effort).
+	if hErr := server.SavePipelineState(p.toDBState()); hErr != nil {
+		pq.ch.Warn("pipeline: could not persist initial state for %s: %v", p.Filename, hErr)
+	}
 }
 
 // ResumePending loads incomplete pipelines from Supabase and re-queues them.

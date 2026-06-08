@@ -171,7 +171,7 @@ func (ch *Channel) processPendingFile(pf pendingFile) {
 	videoPath := pf.videoPath
 	audioPath := pf.audioPath
 
-	if pf.hasSeparateAudio && audioPath != "" {
+	if pf.hasSeparateAudio {
 		ch.processPendingMuxPair(videoPath, audioPath, pf.skipMinDuration)
 		return
 	}
@@ -205,6 +205,11 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string, skipMinDur
 	case videoInfo == nil && audioInfo == nil:
 		return
 	case videoInfo == nil:
+		if muxedFileFromSidecar(audioPath) != "" {
+			ch.Info("mux: stale audio sidecar %s (muxed version exists) — removing", filepath.Base(audioPath))
+			os.Remove(audioPath)
+			return
+		}
 		ch.Info("mux: video track missing; preserving audio-only file %s", filepath.Base(audioPath))
 		if !skipMinDuration && ch.handleMinDurationAndMerge(audioPath) {
 			return
@@ -216,6 +221,11 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string, skipMinDur
 		}
 		return
 	case audioInfo == nil:
+		if muxedFileFromSidecar(videoPath) != "" {
+			ch.Info("mux: stale video sidecar %s (muxed version exists) — removing", filepath.Base(videoPath))
+			os.Remove(videoPath)
+			return
+		}
 		ch.Info("mux: audio track missing; preserving video-only file %s", filepath.Base(videoPath))
 		if !skipMinDuration && ch.handleMinDurationAndMerge(videoPath) {
 			return
@@ -279,6 +289,24 @@ func muxOutputLooksValid(outputPath string, _ /*videoInfo*/, _ /*audioInfo*/ os.
 		return false, "empty output"
 	}
 	return true, ""
+}
+
+// muxedFileFromSidecar checks if a .video.muxed.mp4 file exists for the
+// given sidecar path (.video.mp4 or .audio.mp4).  Returns the muxed path if
+// it exists, or "" otherwise.
+func muxedFileFromSidecar(sidecarPath string) string {
+	base := sidecarPath
+	// Strip .video.mp4 or .audio.mp4 suffix.
+	for _, suf := range []string{".video.mp4", ".audio.mp4"} {
+		if strings.HasSuffix(base, suf) {
+			muxedPath := strings.TrimSuffix(base, suf) + ".video.muxed.mp4"
+			if _, err := os.Stat(muxedPath); err == nil {
+				return muxedPath
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 // videoExt returns true if the extension is a known video extension.
@@ -376,8 +404,12 @@ func uniqueDestPath(path string) string {
 }
 
 func moveFile(src, dest string) error {
-	if err := os.Rename(src, dest); err == nil {
-		return nil
+	// Retry rename with backoff for transient Windows locks (AV, Search Indexer, etc.).
+	for i := 0; i < 3; i++ {
+		if err := os.Rename(src, dest); err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(50*(1<<i)) * time.Millisecond)
 	}
 
 	in, err := os.Open(src)
@@ -413,7 +445,17 @@ func moveFile(src, dest string) error {
 	// DeleteFileW fails with ERROR_ACCESS_DENIED when any handle is
 	// still open, so defer in.Close() would keep the file busy.
 	in.Close()
-	return os.Remove(src)
+
+	// Retry remove with backoff.  If it still fails, the copy succeeded —
+	// the file was effectively moved.  The leftover source will be cleaned
+	// up on the next orphan run.
+	for i := 0; i < 5; i++ {
+		if err := os.Remove(src); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil
 }
 
 // GenerateFilename creates a filename based on the configured pattern and the current timestamp
@@ -534,6 +576,52 @@ func closeTrackedFile(file *os.File) (string, os.FileInfo, error) {
 	return filename, fileInfo, nil
 }
 
+// maybeDeferToPending checks whether min-duration is enabled and, if so,
+// whether filePath is short enough to be deferred.  When the file should be
+// deferred (or on probe failure — we'd rather be safe) it is moved into
+// .pending/<user>/ and the function returns true so callers skip upload.
+func MaybeDeferToPending(filePath string) bool {
+	minDur := 0
+	if server.Config != nil {
+		minDur = server.Config.MinDurationBeforeUpload
+	}
+	if minDur <= 0 {
+		return false // feature disabled — upload directly
+	}
+
+	username := extractUsernameFromFilename(filepath.Base(filePath))
+	if username == "" {
+		// Can't determine the user; fall back to "unknown"
+		username = "unknown"
+	}
+
+	dur, err := VideoDurationSeconds(filePath)
+	if err != nil {
+		log.Printf("[cleanup] min-duration: could not probe %s (%v) — deferring to pending", filepath.Base(filePath), err)
+		_ = moveToPendingDir(filePath, username)
+		return true
+	}
+
+	if dur < float64(minDur) {
+		log.Printf("[cleanup] min-duration: %s = %.1fs (< %ds) — deferring to pending",
+			filepath.Base(filePath), dur, minDur)
+		_ = moveToPendingDir(filePath, username)
+		return true
+	}
+
+	return false // meets threshold — upload normally
+}
+
+// moveToPendingDir moves a file into the .pending/<username>/ directory.
+func moveToPendingDir(filePath, username string) error {
+	pendingDir := pendingSegmentsDir(username)
+	if err := os.MkdirAll(pendingDir, 0777); err != nil {
+		return fmt.Errorf("create pending dir: %w", err)
+	}
+	dest := filepath.Join(pendingDir, filepath.Base(filePath))
+	return os.Rename(filePath, dest)
+}
+
 // CleanupOrphanedFiles processes orphaned sidecar files left behind by
 // cancelled or crashed post-processing runs. Instead of deleting them,
 // it runs them through the full pipeline: mux (if split A/V), generate
@@ -617,6 +705,10 @@ func CleanupOrphanedFiles() {
 					return
 				}
 
+				if MaybeDeferToPending(info.path) {
+					_ = stem
+					return
+				}
 				thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(info.path)
 				UploadOrphanedFile(info.path, thumbURL, spriteURL, previewURL)
 				DeleteSidecarFiles(info.path)
@@ -631,6 +723,19 @@ func CleanupOrphanedFiles() {
 			}
 			aInfo, hasAudio := audioParts[stem]
 			if !hasAudio {
+				// No matching audio sidecar — this video part is stale.
+				// If a muxed result exists for this stem, delete the stale video part.
+				if _, hasMuxed := muxedFiles[stem]; hasMuxed {
+					recoveryLogf(vInfo.name, "recovery: deleting stale video sidecar %s (muxed version exists)", vInfo.name)
+					os.Remove(vInfo.path)
+					continue
+				}
+				// No muxed result either — upload the video part on its own.
+				if !MaybeDeferToPending(vInfo.path) {
+					thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(vInfo.path)
+					UploadOrphanedFile(vInfo.path, thumbURL, spriteURL, previewURL)
+				}
+				DeleteSidecarFiles(vInfo.path)
 				continue
 			}
 
@@ -650,8 +755,10 @@ func CleanupOrphanedFiles() {
 				if err := muxVideoAudio(vInfo.path, aInfo.path, muxedPath); err != nil {
 					recoveryLogf(vInfo.name, "recovery: mux failed for %s: %v — uploading video-only", stem, err)
 					// Fall back to uploading just the video track
-					thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(vInfo.path)
-					UploadOrphanedFile(vInfo.path, thumbURL, spriteURL, previewURL)
+					if !MaybeDeferToPending(vInfo.path) {
+						thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(vInfo.path)
+						UploadOrphanedFile(vInfo.path, thumbURL, spriteURL, previewURL)
+					}
 					DeleteSidecarFiles(vInfo.path)
 					return
 				}
@@ -661,8 +768,10 @@ func CleanupOrphanedFiles() {
 				os.Remove(aInfo.path)
 
 				// Generate thumbnails, upload, and clean up
-				thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(muxedPath)
-				UploadOrphanedFile(muxedPath, thumbURL, spriteURL, previewURL)
+				if !MaybeDeferToPending(muxedPath) {
+					thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(muxedPath)
+					UploadOrphanedFile(muxedPath, thumbURL, spriteURL, previewURL)
+				}
 				DeleteSidecarFiles(muxedPath)
 				os.Remove(muxedPath)
 			}()
@@ -763,13 +872,42 @@ func normalizeFMP4Timestamps(videoPath string) (string, error) {
 // a hyphen, and two digits (i.e. the date portion YYYY-MM-DD).  This avoids false matches when
 // a username itself contains "_20" (e.g. "alice_20_fan_2025-01-01...").
 func extractUsernameFromFilename(filename string) string {
-	if idx := strings.Index(filename, "_20"); idx > 0 {
-		rest := filename[idx+1:]
-		if len(rest) >= 10 && rest[3] == '-' && rest[6] == '-' {
-			return filename[:idx]
+	base := strings.TrimSuffix(filename, filepath.Ext(filename))
+
+	// Strip "merged-" prefix that the merge system prepends.
+	stem := strings.TrimPrefix(base, "merged-")
+
+	// Find the timestamp separator (_YYYY-MM-DD_ or _YYYY-MM-DD-)
+	idx := strings.Index(stem, "_20")
+	if idx < 0 {
+		return ""
+	}
+	rest := stem[idx+1:]
+	if len(rest) < 10 || rest[3] != '-' || rest[6] != '-' {
+		return ""
+	}
+
+	candidate := stem[:idx]
+
+	// Deduplicate: merged filenames become "<user>-<user>" via the merge
+	// system.  Usernames may contain hyphens (e.g. "Awesome-sona"), so we
+	// try every split point and check whether left == right.
+	if hyphen := strings.Index(candidate, "-"); hyphen > 0 {
+		rightSide := candidate[hyphen+1:]
+		if candidate[:hyphen] == rightSide {
+			return candidate[:hyphen]
+		}
+		// Username might contain a hyphen — try later split positions.
+		for h := strings.Index(candidate[hyphen+1:], "-"); h >= 0; h = strings.Index(candidate[hyphen+1:], "-") {
+			hyphen += 1 + h
+			rightSide = candidate[hyphen+1:]
+			if candidate[:hyphen] == rightSide {
+				return candidate[:hyphen]
+			}
 		}
 	}
-	return ""
+
+	return candidate
 }
 
 // extractTimestampFromFilename parses the standard recording timestamp from a
@@ -1092,6 +1230,7 @@ func deletePendingSegments(username string) {
 }
 
 // VideoDurationSeconds probes a video file and returns its duration in seconds.
+// Falls back to parsing ffmpeg stderr output when ffprobe is unavailable or fails.
 func VideoDurationSeconds(videoPath string) (float64, error) {
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer probeCancel()
@@ -1103,10 +1242,42 @@ func VideoDurationSeconds(videoPath string) (float64, error) {
 		"-of", "default=noprint_wrappers=1:nokey=1",
 		videoPath,
 	).Output()
+	if err == nil {
+		dur, parseErr := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+		if parseErr == nil {
+			return dur, nil
+		}
+	}
+
+	// Fallback: ask ffmpeg to decode null and parse "Duration:" from stderr.
+	fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer fallbackCancel()
+	cmd := config.FFmpegCommandContext(fallbackCtx, "-i", videoPath, "-f", "null", "-")
+	stderr, fbErr := cmd.CombinedOutput()
+	if fbErr == nil && len(stderr) > 0 {
+		line := string(stderr)
+		const durationPrefix = "Duration: "
+		if idx := strings.Index(line, durationPrefix); idx >= 0 {
+			rest := line[idx+len(durationPrefix):]
+			if end := strings.IndexAny(rest, "., "); end > 0 {
+				rest = rest[:end]
+			}
+			parts := strings.SplitN(rest, ":", 3)
+			if len(parts) == 3 {
+				hours, _ := strconv.ParseFloat(parts[0], 64)
+				minutes, _ := strconv.ParseFloat(parts[1], 64)
+				seconds, _ := strconv.ParseFloat(parts[2], 64)
+				if hours >= 0 || minutes >= 0 || seconds >= 0 {
+					return hours*3600 + minutes*60 + seconds, nil
+				}
+			}
+		}
+	}
+
 	if err != nil {
 		return 0, fmt.Errorf("probe %s: %w", filepath.Base(videoPath), err)
 	}
-	return strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	return 0, fmt.Errorf("probe %s: could not parse duration from ffprobe or ffmpeg", filepath.Base(videoPath))
 }
 
 // mergeVideos concatenates multiple video files into a single output using the
@@ -1242,7 +1413,7 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
 	// combined duration. Only upload if the merged result meets the threshold.
 	segments := collectPendingSegments(ch.Config.Username)
 	if len(segments) > 1 {
-		mergedPath := filepath.Join(os.TempDir(), "merged-"+ch.Config.Username+"-"+filepath.Base(destPath))
+		mergedPath := filepath.Join(pendingDir, "merged-"+filepath.Base(destPath))
 		ch.Info("min-duration: merging %d pending segment(s)", len(segments))
 		if mErr := mergeVideos(segments, mergedPath); mErr != nil {
 			ch.Error("min-duration: merge failed: %v — segments remain pending for next recording", mErr)
@@ -1330,7 +1501,7 @@ func processAllPendingSegments() {
 			}
 
 			// Min-duration is enabled — merge segments and only upload if threshold met.
-			mergedPath := filepath.Join(os.TempDir(), "merged-"+username+"-"+filepath.Base(segments[0]))
+			mergedPath := filepath.Join(pendingSegmentsDir(username), "merged-"+filepath.Base(segments[0]))
 			recoveryLogf(segments[0], "recovery: merging %d pending segments for %s", len(segments), username)
 			if err := mergeVideos(segments, mergedPath); err != nil {
 				recoveryLogf(segments[0], "recovery: merge failed for %s: %v — leaving segments pending", username, err)
