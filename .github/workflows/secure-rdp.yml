@@ -318,9 +318,18 @@ jobs:
           } else {
             Write-Warning "PySocks download failed - pip may have SOCKS issues"
           }
-          # ALL_PROXY stays set - pip can now use SOCKS5 via PySocks
+          # Temporarily disable proxy for pip - SOCKS5 can be unreliable for PyPI
           Write-Host "Installing Scrapling..."
-          pip install "scrapling[fetchers]"
+          $savedProxy = $env:ALL_PROXY
+          $env:ALL_PROXY = ""
+          $env:all_proxy = ""
+          $env:HTTP_PROXY = ""
+          $env:HTTPS_PROXY = ""
+          pip install --default-timeout=120 "scrapling[fetchers]"
+          if ($savedProxy) {
+            $env:ALL_PROXY = $savedProxy
+            $env:all_proxy = $savedProxy
+          }
           if ($LASTEXITCODE -ne 0) { Write-Warning "Scrapling install failed, skipping cookie refresh"; $skipRefresh = $true }
           if (-not $skipRefresh) {
             Write-Host "Installing browser dependencies..."
@@ -374,11 +383,23 @@ jobs:
           Set-Location $repoDir
 
           # Run setup.bat (now fixed with reg add instead of setx)
+          # Temporarily disable proxy - winget and pip both fail through SOCKS5
+          $savedProxy = $env:ALL_PROXY
+          $env:ALL_PROXY = ""
+          $env:all_proxy = ""
+          $env:HTTP_PROXY = ""
+          $env:HTTPS_PROXY = ""
           if (Test-Path ".\setup.bat") {
             Write-Host "=== Running setup.bat with -NoAppStart ==="
             cmd /c ".\setup.bat -NoAppStart"
             if ($LASTEXITCODE -ne 0) { Write-Error "setup.bat failed"; exit 1 }
             Write-Host "[OK] setup.bat completed"
+          }
+          if ($savedProxy) {
+            $env:ALL_PROXY = $savedProxy
+            $env:all_proxy = $savedProxy
+            $env:HTTP_PROXY = $savedProxy
+            $env:HTTPS_PROXY = $savedProxy
           }
 
           # Step 2: Verify binary exists

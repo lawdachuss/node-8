@@ -1,2 +1,2 @@
-scrapling[fetchers]==0.4.8
+scrapling[fetchers]==0.4.9
 pysocks==1.7.1
