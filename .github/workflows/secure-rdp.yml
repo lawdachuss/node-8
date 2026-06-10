@@ -470,31 +470,45 @@ jobs:
             Write-Warning "Task may not have been created successfully"
           }
           
-          # Start the task immediately using schtasks - wait for it to actually start
-          Write-Host "Starting DVR via scheduled task..."
-          cmd /c "schtasks /Run /TN `"$taskName`""
+          # ====== START DVR DIRECTLY FOR TESTING ======
+          # Start DVR process in background with full output capture,
+          # bypassing the scheduled task wrapper for immediate visibility.
+          # This lets us see startup errors in the CI log directly.
+          Write-Host "=== Starting DVR directly for test ==="
+          $dvrLog = "$repoDir\dvr-output.log"
           
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "[OK] DVR task start command successful"
-          } else {
-            Write-Error "Failed to start DVR task (exit code: $LASTEXITCODE)"
-            exit 1
-          }
+          # Set proxy env vars for this CI process (same as wrapper script does)
+          $backupHTTP = $env:HTTP_PROXY
+          $backupHTTPS = $env:HTTPS_PROXY
+          Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:http_proxy -ErrorAction SilentlyContinue
+          Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
           
-          # Give the task a moment to spawn the process and start
-          Start-Sleep -Seconds 5
-
-          # Wait for DVR to be fully ready on port 8080
-          # Increased from 60s to 180s to account for slow SOCKS5 proxy warmup
-          # where the httpcloak library can block for OS TCP timeout (~30-120s)
+          # Launch DVR as a background process, capturing both stdout and stderr
+          $dvrProcess = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
+          Write-Host "[OK] DVR PID: $($dvrProcess.Id)"
+          
+          # Restore HTTP_PROXY env vars (needed for subsequent steps)
+          if ($backupHTTP) { $env:HTTP_PROXY = $backupHTTP }
+          if ($backupHTTPS) { $env:HTTPS_PROXY = $backupHTTPS }
+          
+          # Give DVR a moment to start up
+          Start-Sleep -Seconds 2
+          
+          # Wait for DVR to listen on port 8080
           Write-Host "=== Waiting for DVR to be ready ==="
           Write-Host "Waiting for DVR to listen on port 8080..."
           $dvrReady = $false
           for ($i = 0; $i -lt 90; $i++) {
-            # Check if wrapper script log exists
-            if ($i -eq 5 -and (Test-Path "$repoDir\dvr-wrapper.log")) {
-              Write-Host "=== DVR Wrapper Log (first 20 lines) ==="
-              Get-Content "$repoDir\dvr-wrapper.log" -First 20 -ErrorAction SilentlyContinue
+            # Check if DVR process died
+            if ($dvrProcess.HasExited) {
+              Write-Host "[ERROR] DVR process exited unexpectedly (code: $($dvrProcess.ExitCode))"
+              Write-Host "=== DVR stdout ==="
+              Get-Content $dvrLog -ErrorAction SilentlyContinue
+              Write-Host "=== DVR stderr ==="
+              Get-Content "$repoDir\dvr-err.log" -ErrorAction SilentlyContinue
+              break
             }
             
             try {
@@ -510,39 +524,18 @@ jobs:
           }
           
           if (-not $dvrReady) {
-            Write-Error "DVR not detected on port 8080 after 180 seconds"
+            # Show partial DVR output for debugging
+            Write-Host ""
+            Write-Host "=== DVR stdout (last 50 lines) ==="
+            Get-Content $dvrLog -Tail 50 -ErrorAction SilentlyContinue
+            Write-Host "=== DVR stderr ==="
+            Get-Content "$repoDir\dvr-err.log" -ErrorAction SilentlyContinue
+            
             Write-Host ""
             Write-Host "=== Diagnostics ==="
-            [Console]::Out.Flush()
-            
-            Write-Host "Checking scheduled task status..."
-            Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Select-Object TaskName, State, LastRunTime, LastTaskResult
-            Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-            [Console]::Out.Flush()
-            
-            Write-Host ""
             Write-Host "Checking if DVR process is running..."
             Get-Process -Name "chaturbate-dvr","powershell" -ErrorAction SilentlyContinue | Format-Table
-            [Console]::Out.Flush()
             
-            Write-Host ""
-            Write-Host "Checking wrapper log..."
-            if (Test-Path "$repoDir\dvr-wrapper.log") {
-              Get-Content "$repoDir\dvr-wrapper.log" -ErrorAction SilentlyContinue
-            } else {
-              Write-Host "Wrapper log not found at $repoDir\dvr-wrapper.log"
-            }
-            [Console]::Out.Flush()
-            
-            Write-Host ""
-            Write-Host "Checking DVR output log..."
-            if (Test-Path "$repoDir\dvr-output.log") {
-              Get-Content "$repoDir\dvr-output.log" -ErrorAction SilentlyContinue
-            } else {
-              Write-Host "DVR output log not found at $repoDir\dvr-output.log"
-            }
-            [Console]::Out.Flush()
-
             Write-Host ""
             Write-Host "Checking if binary exists..."
             if (Test-Path $dvrExe) {
@@ -550,7 +543,6 @@ jobs:
             } else {
               Write-Host "[ERROR] Binary NOT found: $dvrExe"
             }
-            [Console]::Out.Flush()
             
             Write-Host ""
             Write-Host "Checking if .env exists..."
@@ -559,10 +551,32 @@ jobs:
             } else {
               Write-Host "[ERROR] .env NOT found: $repoDir\.env"
             }
-            [Console]::Out.Flush()
             
+            Write-Error "DVR not detected on port 8080 after 180 seconds"
             exit 1
           }
+          
+          # DVR is running and listening - kill direct process; scheduled task will handle persistence
+          Write-Host "[OK] DVR test passed - stopping direct process"
+          $dvrProcess.Kill()
+          $dvrProcess.Dispose()
+          
+          # ====== CREATE SCHEDULED TASK FOR PERSISTENCE ======
+          # Now that we've verified the DVR works, create the scheduled task
+          # so it survives across CI steps and reboots
+          Write-Host ""
+          Write-Host "=== Starting DVR via scheduled task for persistence ==="
+          cmd /c "schtasks /Run /TN `"$taskName`""
+          
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "[OK] DVR scheduled task started"
+          } else {
+            Write-Error "Failed to start DVR scheduled task (exit code: $LASTEXITCODE)"
+            exit 1
+          }
+          
+          # Give the scheduled task a moment to start
+          Start-Sleep -Seconds 3
           
           # Verify DVR is responding to HTTP requests
           Write-Host "Verifying DVR is responding to HTTP requests..."
