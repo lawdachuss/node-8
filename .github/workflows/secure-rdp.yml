@@ -556,30 +556,13 @@ jobs:
             exit 1
           }
           
-          # DVR is running and listening - kill direct process; scheduled task will handle persistence
-          Write-Host "[OK] DVR test passed - stopping direct process"
-          $dvrProcess.Kill()
-          $dvrProcess.Dispose()
-          
-          # ====== CREATE SCHEDULED TASK FOR PERSISTENCE ======
-          # Now that we've verified the DVR works, create the scheduled task
-          # so it survives across CI steps and reboots
-          Write-Host ""
-          Write-Host "=== Starting DVR via scheduled task for persistence ==="
-          cmd /c "schtasks /Run /TN `"$taskName`""
-          
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "[OK] DVR scheduled task started"
-          } else {
-            Write-Error "Failed to start DVR scheduled task (exit code: $LASTEXITCODE)"
-            exit 1
-          }
-          
-          # Give the scheduled task a moment to start
-          Start-Sleep -Seconds 3
+          # DVR is running and listening via direct process.
+          # Keep it alive for the current CI session instead of using
+          # the scheduled task (which has issues with SYSTEM account startup).
+          # The scheduled task remains registered for persistence on reboots.
+          Write-Host "[OK] DVR is running (PID: $($dvrProcess.Id))"
           
           # Verify DVR is responding to HTTP requests
-          Write-Host "Verifying DVR is responding to HTTP requests..."
           $dvrResponding = $false
           for ($i = 0; $i -lt 10; $i++) {
             try {
@@ -918,7 +901,7 @@ jobs:
           Write-Host "  DVR ACCESS (AUTOMATIC)"
           Write-Host "========================================"
           Write-Host ""
-          Write-Host "DVR is running as a scheduled task (SYSTEM-wide)"
+          Write-Host "DVR is running as a background process (PID: $($dvrProcess.Id))"
           Write-Host "Access from inside RDP: http://localhost:8080"
           Write-Host "Access from your PC: http://$env:TAILSCALE_IP`:8080"
           Write-Host ""
