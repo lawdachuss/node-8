@@ -31,11 +31,13 @@ func NewGoFileUploader() *GoFileUploader {
 		client: &http.Client{
 			Timeout: 120 * time.Minute, // Long timeout for large video uploads
 			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 100,
-				IdleConnTimeout:     90 * time.Second,
-				DisableCompression:  true,
-				DialContext:         (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   100,
+				IdleConnTimeout:       90 * time.Second,
+				DisableCompression:    true,
+				TLSHandshakeTimeout:   30 * time.Second,
+				ResponseHeaderTimeout: 90 * time.Second, // fail fast if server accepts but never responds
+				DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
 			},
 		},
 	}

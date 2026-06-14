@@ -631,6 +631,13 @@ sessionWait:
 
 	log.Println("[session] all processing complete — session ended")
 
+	// Signal workflow that all uploads are done so it can safely exit.
+	if err := os.WriteFile("upload-complete.flag", []byte("done"), 0644); err != nil {
+		log.Printf("[session] WARNING: could not write upload-complete.flag: %v", err)
+	} else {
+		log.Println("[session] upload-complete.flag written")
+	}
+
 	m.sessionMu.Lock()
 	m.sessionStarted = false
 	m.sessionMu.Unlock()

@@ -61,7 +61,7 @@ jobs:
           }
           
           if ($hasActiveOverlap) {
-            Write-Host "Another active workflow run was started recently (less than 5 hours and 50 minutes ago)."
+            Write-Host "Another active workflow run was started recently (less than 5 hours and 55 minutes ago)."
             Write-Host "Cancelling this run to enforce timing rules and prevent overlap..."
             gh run cancel $currentRunId --repo "$env:GITHUB_REPOSITORY"
             Start-Sleep -Seconds 60
@@ -869,14 +869,18 @@ jobs:
           Write-Host ""
           
           # ====== KEEP-ALIVE LOOP ======
-          Write-Host "Keeping runner alive for up to 5 hours and 50 minutes..."
+          # Clear any stale flag from a previous session before we start
+          $uploadFlag = "$repoDir\upload-complete.flag"
+          Remove-Item $uploadFlag -Force -ErrorAction SilentlyContinue
+
+          Write-Host "Keeping runner alive for up to 5 hours and 55 minutes..."
           if ($tunnelUrl) {
             Write-Host "Tunnel URL: $tunnelUrl"
           }
           Write-Host ""
           
           $startTime = if ($env:START_TIME) { [int64]$env:START_TIME } else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
-          $targetDuration = 350 * 60
+          $targetDuration = 355 * 60
           
           while ($true) {
             $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -893,7 +897,16 @@ jobs:
             # Restart DVR if it crashed
             if ($dvrProcess.HasExited) {
               Write-Host "[WARNING] DVR process exited (code: $($dvrProcess.ExitCode)) - restarting..."
+              # Pass remaining session time so the restarted DVR stops recordings at the right moment.
+              # Session ends at 5h20m from workflow start; subtract elapsed time to get what's left.
+              $sessionTotalSecs = 5 * 3600 + 20 * 60
+              $remainingSessionSecs = [Math]::Max(60, $sessionTotalSecs - $elapsed)
+              $remainingMins = [Math]::Floor($remainingSessionSecs / 60)
+              $remainingSecs2 = $remainingSessionSecs % 60
+              $env:SESSION_DURATION = "${remainingMins}m${remainingSecs2}s"
+              Write-Host "[INFO] Restarting DVR with SESSION_DURATION=$env:SESSION_DURATION"
               $dvrProcess = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
+              $env:SESSION_DURATION = ""
             }
             
             # Restart cloudflared if it crashed
@@ -920,6 +933,24 @@ jobs:
             Start-Sleep -Seconds $sleepSecs
           }
           
+          # ====== WAIT FOR UPLOADS TO COMPLETE ======
+          Write-Host "Keep-alive loop ended. Waiting for DVR to finish all uploads..."
+          $waitStart = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          $maxWaitSecs = 240  # wait up to 4 minutes (leaves ~1 min buffer before 6h limit)
+          while (-not (Test-Path $uploadFlag)) {
+            $waited = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $waitStart
+            if ($waited -ge $maxWaitSecs) {
+              Write-Host "[WARNING] Upload wait timeout ($maxWaitSecs s) — proceeding anyway. Some uploads may still be in progress."
+              break
+            }
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Waiting for upload-complete.flag... ($waited s elapsed)"
+            Start-Sleep -Seconds 15
+          }
+          if (Test-Path $uploadFlag) {
+            Write-Host "[OK] DVR finished all upload processing. Check dvr-output.log for per-file results."
+            Remove-Item $uploadFlag -Force -ErrorAction SilentlyContinue
+          }
+
           Write-Host "Session timeout reached - triggering next workflow run..."
           $branch = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "main" }
           gh workflow run secure-rdp.yml --repo $env:GITHUB_REPOSITORY --ref $branch

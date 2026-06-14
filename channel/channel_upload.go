@@ -31,8 +31,8 @@ func embedURLFromLink(host, link string) string {
 }
 
 const (
-        maxChannelUploadAttempts = 3
-        channelUploadRetryDelay  = 60 * time.Second
+        maxChannelUploadAttempts = 8
+        channelUploadRetryDelay  = 5 * time.Second
 )
 
 // uploadFile uploads the given file to all configured hosts.
