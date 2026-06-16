@@ -1,6 +1,7 @@
 package uploader
 
 import (
+"bytes"
 "encoding/json"
 "fmt"
 "io"
@@ -41,53 +42,36 @@ client: newNoProxyClient(2 * time.Minute),
 func (t *ThumbnailUploader) Upload(thumbnailPath string) (string, error) {
 log.Printf("Uploading thumbnail to Pixhost.to: %s", thumbnailPath)
 
-file, err := os.Open(thumbnailPath)
+fileData, err := os.ReadFile(thumbnailPath)
 if err != nil {
-return "", fmt.Errorf("open file: %w", err)
+return "", fmt.Errorf("read file: %w", err)
 }
-defer file.Close()
 
-// Build multipart form via pipe to avoid buffering the whole image in memory
-pr, pw := io.Pipe()
-writer := multipart.NewWriter(pw)
+// Buffer the entire multipart body so http.NewRequest can set Content-Length.
+// Pixhost CDN returns 414 on chunked (no Content-Length) requests.
+var buf bytes.Buffer
+writer := multipart.NewWriter(&buf)
 
-errCh := make(chan error, 1)
-go func() {
-defer pw.Close()
-// Pixhost expects field name "img"
 part, err := writer.CreateFormFile("img", filepath.Base(thumbnailPath))
 if err != nil {
-errCh <- fmt.Errorf("create form file: %w", err)
-writer.Close()
-return
+return "", fmt.Errorf("create form file: %w", err)
 }
-if _, err := io.Copy(part, file); err != nil {
-errCh <- fmt.Errorf("copy file: %w", err)
-writer.Close()
-return
+if _, err := io.Copy(part, bytes.NewReader(fileData)); err != nil {
+return "", fmt.Errorf("copy file: %w", err)
 }
-
-// Set content_type: 0 for SFW, 1 for NSFW
-// Using 1 (NSFW) since this is for adult content
 if err := writer.WriteField("content_type", "1"); err != nil {
-errCh <- fmt.Errorf("write content_type field: %w", err)
-writer.Close()
-return
+return "", fmt.Errorf("write content_type field: %w", err)
 }
-
-// Optional: set thumbnail size (150-500, default 200)
 if err := writer.WriteField("max_th_size", "420"); err != nil {
-errCh <- fmt.Errorf("write max_th_size field: %w", err)
-writer.Close()
-return
+return "", fmt.Errorf("write max_th_size field: %w", err)
 }
-
-errCh <- writer.Close()
-}()
+if err := writer.Close(); err != nil {
+return "", fmt.Errorf("close writer: %w", err)
+}
 
 // Pixhost API endpoint
 uploadURL := "https://api.pixhost.to/images"
-req, err := http.NewRequest("POST", uploadURL, pr)
+req, err := http.NewRequest("POST", uploadURL, &buf)
 if err != nil {
 return "", fmt.Errorf("create request: %w", err)
 }
@@ -96,16 +80,9 @@ req.Header.Set("Accept", "application/json")
 
 resp, err := t.client.Do(req)
 if err != nil {
-        pr.CloseWithError(err) // unblock the writer goroutine
-        <-errCh               // drain to avoid goroutine leak
-        return "", fmt.Errorf("send request: %w", err)
+return "", fmt.Errorf("send request: %w", err)
 }
 defer resp.Body.Close()
-
-// Wait for the writer goroutine to finish
-if werr := <-errCh; werr != nil {
-        return "", werr
-}
 
 body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB limit
 if err != nil {

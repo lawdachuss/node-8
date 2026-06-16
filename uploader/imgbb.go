@@ -17,8 +17,8 @@ type imgbbResponse struct {
 	Data struct {
 		URL string `json:"url"`
 	} `json:"data"`
-	Status int    `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Status int             `json:"status"`
+	Error  json.RawMessage `json:"error,omitempty"`
 }
 
 type ImgBBUploader struct {
@@ -67,8 +67,15 @@ func (u *ImgBBUploader) Upload(filePath string) (string, error) {
 	}
 
 	if result.Status != 200 {
-		msg := result.Error
-		if msg == "" {
+		msg := string(result.Error)
+		// ImgBB error is an object like {"message":"...","code":...}; extract message if possible.
+		var errObj struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(result.Error, &errObj) == nil && errObj.Message != "" {
+			msg = errObj.Message
+		}
+		if msg == "" || msg == "null" {
 			msg = string(body)
 		}
 		return "", fmt.Errorf("imgbb: error: %s", msg)
