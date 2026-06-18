@@ -23,8 +23,8 @@ const (
 	spriteFrameW      = 640
 	spriteFrameH      = 360
 	previewWidth      = 320
-	previewBaseFrames = 40
-	previewFPS        = 24
+	previewDuration   = 6.0   // seconds
+	previewSegments   = 12    // number of smooth clips to stitch (each ~0.5s)
 )
 
 // generateThumbnail is the channel-scoped wrapper — logs go to the channel log.
@@ -45,9 +45,9 @@ func GenerateThumbnailForFile(videoPath string) (thumbURL, spriteURL, previewURL
 }
 
 // generateThumbnailForFile creates a static thumbnail (JPEG), a multi-frame sprite
-// sheet (JPEG), and an MP4 hover preview (4-second clip).
-// All three are uploaded to remote hosts and the URLs returned.  Local
-// temp files are always cleaned up.
+// sheet (JPEG), and an MP4 hover preview (6 seconds of smooth clips from
+// across the full video).  All three are uploaded to remote hosts and the
+// URLs returned.  Local temp files are always cleaned up.
 //
 // JPEG is used for thumbnail and sprite because:
 //   - All image hosts support it (Pixhost, ImgBB, Catbox)
@@ -57,13 +57,18 @@ func GenerateThumbnailForFile(videoPath string) (thumbURL, spriteURL, previewURL
 // MP4 is used for the animated preview because:
 //   - ~90% smaller than GIF at same quality
 //   - Full 24-bit color (no 256-color palette limit)
-//   - Smooth 24fps playback (GIF was variable ~1-8fps)
+//   - Smooth native-framerate playback (GIF was variable ~1-8fps)
 //   - Catbox accepts MP4 files (free, permanent, CDN-backed)
+//
+// The preview uses filter_complex to extract 12 short clips (~0.5s each)
+// from evenly-spaced points across the full video and stitch them together.
+// Each clip has consecutive frames for fully smooth motion, unlike a
+// frame-sampled timelapse where every frame is a jarring jump.
 //
 // Thumbnail, sprite, and preview run in parallel with independent timeouts:
 //   - thumbnail: 5 min  (single-frame seek)
 //   - sprite:    15 min (seeks through full video for long recordings)
-//   - preview:   15 min (timelapse across full video, H.264 encode)
+//   - preview:   15 min (12× trim + stitch, H.264 encode)
 //
 // Using separate contexts prevents one task from being killed prematurely
 // when a long video causes another to exceed a shared short timeout.
@@ -236,21 +241,24 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		}
 	}()
 
-	// ── MP4 hover preview (timelapse across the full video) ───────────────
+	// ── MP4 hover preview (smooth clips from across the video, 6s total) ──
 	// H.264 MP4 is used instead of GIF because:
 	//   - ~90% smaller file size for the same visual quality
 	//   - Full 24-bit color (vs 256-color palette in GIF)
-	//   - Smooth 24fps playback (GIF was limited to ~8fps variable rate)
+	//   - Smooth native-framerate playback (GIF was variable ~1-8fps)
 	//   - Catbox accepts MP4 files (200MB limit, permanent storage)
 	//
-	// Frames are sampled evenly across the entire video and played back at
-	// 24fps, creating a fast-paced timelapse that shows the full recording:
-	//   <1 min:    40 frames × 1/24 s = 1.67 s preview
-	//   1-10 min:  60 frames × 1/24 s = 2.50 s preview
-	//   10-60+min: 80 frames × 1/24 s = 3.33 s preview
+	// Instead of isolated frame sampling (which produces a jerky slideshow),
+	// we extract 12 short continuous clips (~0.5s each) from evenly-spaced
+	// points across the video and stitch them together.  Each clip has fully
+	// smooth motion because frames within it are consecutive.
 	//
-	// Uploaded directly to Catbox.moe (free, permanent, CDN-backed) instead
-	// of the image-only Pixhost/ImgBB fallback chain.
+	//   <6 sec:  no segmenting, plays whole video at normal speed
+	//   1 min:   12 clips × 0.5s = 6s (5s between clips)
+	//   60 min:  12 clips × 0.5s = 6s (5 min between clips)
+	//
+	// Uploaded to Catbox.moe (free, permanent, CDN-backed) with PixelDrain
+	// as fallback — both return direct file URLs suitable for embedding.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -264,33 +272,66 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		previewMP4 := videoPath + ".preview.mp4"
 		defer os.Remove(previewMP4)
 
-		previewFrames := previewBaseFrames
-		if dur > 60 {
-			previewFrames = 60
-		}
-		if dur > 600 {
-			previewFrames = 80
-		}
-
-		interval := dur / float64(previewFrames)
-		if interval < 0.1 {
-			interval = 0.1
-		}
-
 		config.AcquireFFmpeg()
-		err := config.FFmpegCommandContext(previewCtx,
-			"-y",
-			"-i", videoPath,
-			"-vf", fmt.Sprintf("fps=1/%f,scale=%d:-2:flags=lanczos,setpts=N/%d/TB",
-				interval, previewWidth, previewFPS),
-			"-r", strconv.Itoa(previewFPS),
-			"-c:v", "libx264",
-			"-preset", "fast",
-			"-crf", "23",
-			"-movflags", "+faststart",
-			"-an",
-			previewMP4,
-		).Run()
+
+		var err error
+		if dur <= previewDuration {
+			// Short video — no segmenting needed, just scale.
+			err = config.FFmpegCommandContext(previewCtx,
+				"-y",
+				"-i", videoPath,
+				"-vf", fmt.Sprintf("scale=%d:-2:flags=lanczos", previewWidth),
+				"-c:v", "libx264",
+				"-preset", "fast",
+				"-crf", "23",
+				"-movflags", "+faststart",
+				"-an",
+				previewMP4,
+			).Run()
+		} else {
+			// Build a filter_complex that extracts clips and stitches them.
+			segDuration := previewDuration / float64(previewSegments)
+			step := dur / float64(previewSegments)
+
+			var filterParts []string
+			var concatInputs []string
+
+			for i := 0; i < previewSegments; i++ {
+				midpoint := step * (float64(i) + 0.5)
+				start := midpoint - segDuration/2
+				if start < 0 {
+					start = 0
+				}
+				if start+segDuration > dur {
+					start = dur - segDuration
+				}
+
+				label := fmt.Sprintf("v%d", i)
+				filterParts = append(filterParts, fmt.Sprintf(
+					"[0:v]trim=start=%.3f:duration=%.3f,setpts=PTS-STARTPTS,scale=%d:-2:flags=lanczos[%s]",
+					start, segDuration, previewWidth, label,
+				))
+				concatInputs = append(concatInputs, fmt.Sprintf("[%s]", label))
+			}
+
+			filterComplex := strings.Join(filterParts, ";") + ";" +
+				strings.Join(concatInputs, "") +
+				fmt.Sprintf("concat=n=%d:v=1:a=0[out]", previewSegments)
+
+			err = config.FFmpegCommandContext(previewCtx,
+				"-y",
+				"-i", videoPath,
+				"-filter_complex", filterComplex,
+				"-map", "[out]",
+				"-c:v", "libx264",
+				"-preset", "fast",
+				"-crf", "23",
+				"-movflags", "+faststart",
+				"-an",
+				previewMP4,
+			).Run()
+		}
+
 		config.ReleaseFFmpeg()
 
 		if err != nil {
@@ -300,11 +341,19 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		}
 
 		catboxUploader := uploader.NewCatboxUploader()
-		if remoteURL, uploadErr := catboxUploader.Upload(previewMP4); uploadErr == nil {
+		pixeldrainUploader := uploader.NewPixelDrainUploader(os.Getenv("PIXELDRAIN_API_KEY"))
+
+		remoteURL, uploadErr := catboxUploader.Upload(previewMP4)
+		if uploadErr != nil {
+			errFn("preview: catbox failed for %s: %v, trying PixelDrain fallback", baseName, uploadErr)
+			remoteURL, uploadErr = pixeldrainUploader.Upload(previewMP4)
+		}
+
+		if uploadErr == nil {
 			info("preview: ✓ %s", baseName)
 			previewDone <- remoteURL
 		} else {
-			errFn("preview: upload failed for %s: %v", baseName, uploadErr)
+			errFn("preview: all hosts failed for %s: %v", baseName, uploadErr)
 			previewDone <- ""
 		}
 	}()
