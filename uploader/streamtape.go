@@ -6,11 +6,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // streamtapeSem limits concurrent uploads to Streamtape.
-const streamtapeSemCap = 2
+const streamtapeSemCap = 3
 
 var streamtapeSem = make(chan struct{}, streamtapeSemCap)
 
@@ -75,11 +76,28 @@ func (u *StreamtapeUploader) UploadWithProgress(filePath string, progress Progre
 		return "", fmt.Errorf("get upload URL: %w", err)
 	}
 
-	link, err := u.uploadFile(filePath, uploadURL, progress)
-	if err != nil {
-		return "", fmt.Errorf("upload file: %w", err)
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			time.Sleep(uploadBackoff(attempt-2, lastErr))
+		}
+
+		link, err := u.uploadFile(filePath, uploadURL, progress)
+		if err != nil {
+			lastErr = fmt.Errorf("upload file: %w", err)
+			if isUploadRateLimited(err) {
+				time.Sleep(uploadBackoff(attempt, err))
+				lastErr = nil
+				continue
+			}
+			if attempt < 3 {
+				continue
+			}
+			return "", lastErr
+		}
+		return link, nil
 	}
-	return link, nil
+	return "", lastErr
 }
 
 func (u *StreamtapeUploader) getUploadURL() (string, error) {
@@ -136,6 +154,10 @@ func (u *StreamtapeUploader) uploadFile(filePath, uploadURL string, progress Pro
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("upload status 429: rate limit — %s", strings.TrimSpace(string(body)))
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("upload status %d: %s", resp.StatusCode, string(body))

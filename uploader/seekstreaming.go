@@ -13,7 +13,8 @@ import (
 	"time"
 )
 
-const seekStreamingSemCap = 2
+// seekStreamingSem limits concurrent uploads to SeekStreaming.
+const seekStreamingSemCap = 3
 
 var seekStreamingSem = make(chan struct{}, seekStreamingSemCap)
 
@@ -59,17 +60,43 @@ func (u *SeekStreamingUploader) UploadWithProgress(filePath string, progress Pro
 		return "", fmt.Errorf("seekstreaming: %w", err)
 	}
 
-	uploadURL, err := u.createTUSUpload(ep, filePath)
-	if err != nil {
-		return "", fmt.Errorf("seekstreaming: create tus upload: %w", err)
-	}
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			time.Sleep(uploadBackoff(attempt-2, lastErr))
+		}
 
-	videoID, err := u.uploadFileTUS(uploadURL, filePath, progress)
-	if err != nil {
-		return "", fmt.Errorf("seekstreaming: upload file: %w", err)
-	}
+		uploadURL, err := u.createTUSUpload(ep, filePath)
+		if err != nil {
+			lastErr = fmt.Errorf("create tus upload: %w", err)
+			if isUploadRateLimited(err) {
+				time.Sleep(uploadBackoff(attempt, err))
+				lastErr = nil
+				continue
+			}
+			if attempt < 3 {
+				continue
+			}
+			return "", lastErr
+		}
 
-	return fmt.Sprintf("https://chuglii.embedseek.com/#%s", videoID), nil
+		videoID, err := u.uploadFileTUS(uploadURL, filePath, progress)
+		if err != nil {
+			lastErr = fmt.Errorf("upload file: %w", err)
+			if isUploadRateLimited(err) {
+				time.Sleep(uploadBackoff(attempt, err))
+				lastErr = nil
+				continue
+			}
+			if attempt < 3 {
+				continue
+			}
+			return "", lastErr
+		}
+
+		return fmt.Sprintf("https://chuglii.embedseek.com/#%s", videoID), nil
+	}
+	return "", lastErr
 }
 
 func (u *SeekStreamingUploader) getUploadEndpoint() (*seekStreamingUploadEndpointResp, error) {
@@ -86,6 +113,10 @@ func (u *SeekStreamingUploader) getUploadEndpoint() (*seekStreamingUploadEndpoin
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("status 429: rate limit — %s", strings.TrimSpace(string(body)))
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(body))

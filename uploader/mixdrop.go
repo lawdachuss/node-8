@@ -6,11 +6,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // mixdropSem limits concurrent uploads to Mixdrop.
-const mixdropSemCap = 2
+const mixdropSemCap = 3
 
 var mixdropSem = make(chan struct{}, mixdropSemCap)
 
@@ -62,6 +63,31 @@ func (u *MixdropUploader) UploadWithProgress(filePath string, progress ProgressF
 	mixdropSem <- struct{}{}
 	defer func() { <-mixdropSem }()
 
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			time.Sleep(uploadBackoff(attempt-2, lastErr))
+		}
+
+		link, err := u.uploadFile(filePath, progress)
+		if err != nil {
+			lastErr = fmt.Errorf("upload file: %w", err)
+			if isUploadRateLimited(err) {
+				time.Sleep(uploadBackoff(attempt, err))
+				lastErr = nil
+				continue
+			}
+			if attempt < 3 {
+				continue
+			}
+			return "", lastErr
+		}
+		return link, nil
+	}
+	return "", lastErr
+}
+
+func (u *MixdropUploader) uploadFile(filePath string, progress ProgressFunc) (string, error) {
 	// Credentials go in form fields only — no Authorization header.
 	// The API field is "key" (matches the env-var MIXDROP_KEY), not "token".
 	// Build multipart body with exact Content-Length; Mixdrop's nginx proxy
@@ -92,6 +118,9 @@ func (u *MixdropUploader) UploadWithProgress(filePath string, progress ProgressF
 
 	rawBody, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return "", fmt.Errorf("upload status 429: rate limit — %s", strings.TrimSpace(string(rawBody)))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("upload status %d: %s", resp.StatusCode, string(rawBody))
 	}

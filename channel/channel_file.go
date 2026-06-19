@@ -835,6 +835,20 @@ func DeleteSidecarFiles(videoPath string) {
 	}
 }
 
+// removeFileWithRetry attempts to remove a file, retrying up to maxAttempts
+// times with exponential backoff.  This handles transient Windows file locks
+// from AV scanners, Search Indexer, etc.  Returns nil if the file was removed
+// (or didn't exist).
+func removeFileWithRetry(path string, maxAttempts int) error {
+	for i := 0; i < maxAttempts; i++ {
+		if err := os.Remove(path); err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		time.Sleep(time.Duration(200*(1<<min(i, 4))) * time.Millisecond) // 200ms, 400ms, 800ms, 1.6s, …
+	}
+	return os.Remove(path) // final attempt, return the error
+}
+
 // muxVideoAudio combines a separate video and audio file into a single MP4.
 // Uses a 5-minute timeout so a hung ffmpeg cannot leak the caller's goroutine.
 func muxVideoAudio(videoPath, audioPath, outputPath string) error {
@@ -1178,7 +1192,10 @@ func UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL string) bool {
 	// Delete local file only once ALL hosts have the file safely and metadata
 	// is persisted. Otherwise the file remains available for retry.
 	if cfg.DeleteLocalAfterUpload && len(success) > 0 && dbSaved {
-		os.Remove(filePath)
+		if err := removeFileWithRetry(filePath, 10); err != nil {
+			recoveryLogf(filename, "could not remove local file after 10 attempts: %v — will retry on next restart", err)
+			return true
+		}
 		DeleteSidecarFiles(filePath)
 		if fileHash != "" {
 			if jErr := server.DeleteJournalByHash(fileHash); jErr != nil {

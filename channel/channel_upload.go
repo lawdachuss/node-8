@@ -33,8 +33,8 @@ func embedURLFromLink(host, link string) string {
 }
 
 const (
-        maxChannelUploadAttempts = 8
-        channelUploadRetryDelay  = 5 * time.Second
+	maxChannelUploadAttempts = 8
+	channelUploadRetryDelay  = 5 * time.Second
 )
 
 // uploadFile uploads the given file to all configured hosts.
@@ -239,7 +239,9 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 		// the metadata is persisted.  If the DB save failed, the journal
 		// was cleared above so the upload retries and generates fresh links.
 		if server.Config != nil && server.Config.DeleteLocalAfterUpload && len(success) > 0 && dbSaved {
-			_ = os.Remove(filePath)
+			if removeErr := removeFileWithRetry(filePath, 10); removeErr != nil {
+				ch.Warn("upload: could not remove %s after 10 attempts: %v — keeping for retry", filename, removeErr)
+			}
 			// Also clean up any associated preview sidecar files
 			for _, suffix := range []string{".thumb.webp", ".thumb.jpg", ".sprite.webp", ".sprite.jpg", ".preview.webp", ".preview.mp4", ".thumb", ".sprite"} {
 				_ = os.Remove(filePath + suffix)

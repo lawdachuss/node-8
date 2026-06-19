@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -156,6 +157,31 @@ func (m *MultiHostUploader) SetProgressCallback(fn ProgressFunc) {
 }
 
 const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+
+// isUploadRateLimited returns true if the error indicates a rate-limit hit
+// (429 Too Many Requests or similar). Uses a different name than imgbb.go's
+// isRateLimitError to avoid redeclaration.
+func isUploadRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "429") ||
+		strings.Contains(msg, "too many requests")
+}
+
+// uploadBackoff returns the appropriate backoff duration based on whether
+// the error was a rate-limit hit. Rate limits get a longer 30s+10s/attempt,
+// while other errors use standard exponential delay.
+func uploadBackoff(attempt int, err error) time.Duration {
+	if isUploadRateLimited(err) {
+		// Long backoff for rate limits — wait 30s + 10s per retry
+		return 30*time.Second + time.Duration(attempt)*10*time.Second
+	}
+	// Standard exponential backoff: 5s, 10s, 20s, 40s...
+	return time.Duration((1<<uint(attempt))*5) * time.Second
+}
 
 // nilLogger discards all log messages when no logger is provided.
 type nilLogger struct{}

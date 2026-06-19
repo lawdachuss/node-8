@@ -352,13 +352,18 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			// (e.g. when the video stream has unusual timing), causing the
 			// uploader to fail with "file not found" even though ffmpeg
 			// exited 0.
+			//
+			// Use a fresh context so the fallback gets its own 5-minute
+			// timeout instead of inheriting the nearly-expired previewCtx.
 			if err != nil || !fileExists(previewMP4) {
 				if err != nil {
 					errFn("preview: complex filter failed for %s: %v, trying simple fallback", baseName, err)
 				} else {
 					errFn("preview: complex filter produced no output for %s, trying simple fallback", baseName)
 				}
-				err = config.FFmpegCommandContext(previewCtx,
+				fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				defer fallbackCancel()
+				err = config.FFmpegCommandContext(fallbackCtx,
 					"-y",
 					"-ss", fmt.Sprintf("%.2f", dur*0.3),
 					"-i", videoPath,

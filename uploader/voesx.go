@@ -11,7 +11,7 @@ import (
 
 const (
 	voeSXAPIBase = "https://voe.sx/api"
-	// voeSXSem limits concurrent uploads to VOE.sx.
+	// voeSXSem limits concurrent uploads — VOE API docs say 3-4 req/s limit.
 	voeSXSemCap = 3
 )
 
@@ -76,17 +76,20 @@ func (u *VoeSXUploader) UploadWithProgress(filePath string, progress ProgressFun
 
 	var lastErr error
 
-	// Retry with exponential backoff
 	maxAttempts := 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
-			backoff := time.Duration((1<<uint(attempt-2))*5) * time.Second
-			time.Sleep(backoff)
+			time.Sleep(uploadBackoff(attempt-2, lastErr))
 		}
 
 		downloadLink, err := u.uploadFile(filePath, progress)
 		if err != nil {
 			lastErr = fmt.Errorf("upload file: %w", err)
+			if isUploadRateLimited(err) {
+				time.Sleep(uploadBackoff(attempt, err))
+				lastErr = nil
+				continue
+			}
 			if attempt < maxAttempts {
 				continue
 			}

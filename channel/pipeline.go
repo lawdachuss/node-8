@@ -506,8 +506,8 @@ func (p *Pipeline) stageCleanup(ch *Channel) error {
 	}
 
 	ch.Info("cleanup: removing local files for %s", p.Filename)
-	if err := os.Remove(p.FilePath); err != nil && !os.IsNotExist(err) {
-		ch.Error("cleanup: could not remove %s: %v", p.Filename, err)
+	if err := removeFileWithRetry(p.FilePath, 10); err != nil {
+		ch.Error("cleanup: could not remove %s after 10 attempts: %v", p.Filename, err)
 		p.LastError = err.Error()
 		return err
 	}

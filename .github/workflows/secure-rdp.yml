@@ -75,29 +75,136 @@ jobs:
         run: |
           function log { param($m) Write-Host "$m"; [Console]::Out.Flush() }
 
-          $proxyList = @(
-            "socks5://5.255.117.250:1080",
-            "socks5://185.233.184.165:1080",
-            "socks5://5.255.113.177:1080"
-          )
+          function Fetch-Proxies($url) {
+            try {
+              $raw = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 15 -ErrorAction Stop
+              $list = @()
+              foreach ($line in ($raw -split "`n")) {
+                $line = $line.Trim()
+                if ($line -ne "" -and $line -notmatch '^#') {
+                  if ($line -match '^socks5://') { $list += $line }
+                  elseif ($line -match '^(\d+\.\d+\.\d+\.\d+):(\d+)$') { $list += "socks5://$line" }
+                }
+              }
+              return $list
+            } catch { return @() }
+          }
+
+          function Test-Proxy($proxyUrl) {
+            try {
+              $ip = curl.exe -x $proxyUrl -s -m 8 https://api.ipify.org 2>$null
+              if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { return $ip.Trim() }
+            } catch {}
+            return $null
+          }
+
+          log "=== Fetching live SOCKS5 proxies ==="
+          $allProxies = @()
+
+          # Source 1: ProxyScrape API - Netherlands SOCKS5
+          log "Fetching NL proxies from ProxyScrape API..."
+          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=nl"
+          log "  Got $($allProxies.Count) NL proxies from API"
+
+          # Source 2: jsDelivr CDN mirror of ProxyScrape - Netherlands SOCKS5
+          log "Fetching NL proxies from CDN mirror..."
+          $allProxies += Fetch-Proxies "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/nl/socks5/data.txt"
+          log "  Total: $($allProxies.Count) NL proxies"
+
+          # Source 3: ProxyScrape API - India SOCKS5 (fallback region)
+          log "Fetching IN proxies from ProxyScrape API..."
+          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=in"
+          log "  Total: $($allProxies.Count) proxies (NL + IN)"
+
+          # Source 4: All regions SOCKS5 from CDN mirror (broad fallback)
+          log "Fetching all-region proxies from CDN mirror..."
+          $allProxies += Fetch-Proxies "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/socks5/data.txt"
+          
+          # Remove duplicates
+          $allProxies = $allProxies | Select-Object -Unique
+          log "Total unique proxies to test: $($allProxies.Count)"
+
+          if ($allProxies.Count -eq 0) {
+            log "WARNING: No proxies fetched from APIs. Using emergency fallback list."
+            $allProxies = @(
+              "socks5://5.255.117.250:1080",
+              "socks5://185.233.184.165:1080",
+              "socks5://5.255.113.177:1080",
+              "socks5://103.139.106.174:1080",
+              "socks5://103.139.106.200:1080",
+              "socks5://103.139.107.14:1080"
+            )
+          }
 
           $selected = $null
           $selectedIp = $null
+          $fallbackProxy = $null  # working proxy but not NL/IN region
+          $fallbackIp = $null
+          $tested = 0
+          $lastLogAt = 0
 
-          foreach ($p in $proxyList) {
-            log "Testing $p ..."
+          log ""
+          log "=== Testing proxies (prefer NL/IN, accept any as last resort) ==="
+          foreach ($p in $allProxies) {
+            $tested++
+            if ($tested -ge $lastLogAt + 100) { 
+              log "  Tested $tested/$($allProxies.Count) proxies..."
+              $lastLogAt = $tested
+            }
+            $ip = Test-Proxy $p
+            if (-not $ip) { continue }
+
+            # Verify region via ipinfo.io
             try {
-              $ip = curl.exe -x $p -s -m 10 https://api.ipify.org 2>$null
-              if ($ip -match '^\d+\.\d+\.\d+\.\d+$') {
-                $selected = $p
-                $selectedIp = $ip.Trim()
-                log "WORKING: $p (IP: $selectedIp)"
-                break
+              $locRaw = curl.exe -x $p -s -m 8 https://ipinfo.io/json 2>$null
+              if ($locRaw) {
+                $loc = $locRaw | ConvertFrom-Json -ErrorAction Stop
+                $country = $loc.country
+                if ($country -eq "NL" -or $country -eq "IN") {
+                  $selected = $p
+                  $selectedIp = $ip
+                  log ""
+                  log "✅ WORKING: $p"
+                  log "   IP: $ip / Country: $country ($($loc.org))"
+                  break
+                }
               }
-            } catch { log "Failed: $p" }
+            } catch {}
+            # Working but wrong region — save as fallback
+            if (-not $fallbackProxy) {
+              $fallbackProxy = $p
+              $fallbackIp = $ip
+              log "  ⚡ Fallback candidate: $p (IP: $ip) — will use if no NL/IN found"
+            }
           }
 
-          if (-not $selected) { Write-Error "No working SOCKS5 proxy found"; exit 1 }
+          # If no NL/IN proxy found, use the fallback (any working proxy)
+          if (-not $selected -and $fallbackProxy) {
+            $selected = $fallbackProxy
+            $selectedIp = $fallbackIp
+            log ""
+            log "⚠️ No NL/IN proxy found — using fallback: $selected (IP: $selectedIp)"
+          }
+
+          if (-not $selected) {
+            Write-Error "❌ No working SOCKS5 proxy found after testing all sources."
+            log ""
+            log "TROUBLESHOOTING:"
+            log "1. GitHub Actions runners are in US/VA - Chaturbate requires NL or IN IP"
+            log "2. The ProxyScrape free proxy list may be empty or all proxies are dead"
+            log "3. To fix this permanently, set up a PROXY_URL secret with working SOCKS5 proxies"
+            log "   e.g., PROXY_URLS=socks5://user:pass@your-proxy.com:1080"
+            log ""
+            log "Workaround: Use a free proxy provider like Webshare (10 free proxies)"
+            log "Sign up at https://www.webshare.io/ and add your proxies to GitHub secrets"
+            exit 1
+          }
+
+          $regionLabel = ""
+          try {
+            $loc = curl.exe -x $selected -s -m 8 https://ipinfo.io/json 2>$null | ConvertFrom-Json
+            $regionLabel = " / $($loc.country) - $($loc.org)"
+          } catch {}
 
           echo "ALL_PROXY=$selected" >> $env:GITHUB_ENV
           echo "all_proxy=$selected" >> $env:GITHUB_ENV
@@ -105,10 +212,8 @@ jobs:
 
           & git config --global http.proxy $selected
           & git config --global https.proxy $selected
-          log "[OK] Git configured to use $selected"
+          log "[OK] Git configured to use $selected$regionLabel"
           
-          # DON'T set system-wide proxy yet - it breaks winget and GitHub Actions
-          # We'll set it AFTER setup.bat completes
           log "[OK] Proxy configured for Git operations"
 
           log "Verifying proxy egress..."
@@ -120,7 +225,7 @@ jobs:
             log "Public IP: $ip / $($loc.country) - $($loc.org)"
           } catch { log "Verification failed: $_" }
           $LASTEXITCODE = 0
-          log "[OK] Netherlands SOCKS5 proxy configured."
+          log "[OK] SOCKS5 proxy configured."
 
       - name: Configure Windows RDP
         shell: powershell

@@ -14,8 +14,8 @@ import (
 
 const (
 	gofileAPIBase = "https://api.gofile.io"
-	// gofileSem limits concurrent uploads to GoFile to avoid connection saturation.
-	gofileSemCap = 3
+	// gofileSem limits concurrent uploads to GoFile — 5 is safe below rate-limit thresholds.
+	gofileSemCap = 5
 )
 
 var gofileSem = make(chan struct{}, gofileSemCap)
@@ -78,12 +78,10 @@ func (u *GoFileUploader) UploadWithProgress(filePath string, progress ProgressFu
 	var downloadLink string
 	var lastErr error
 
-	// Retry with exponential backoff: 0s, 5s, 15s, 35s (total ~55s)
 	maxAttempts := 4
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
-			backoff := time.Duration((1<<uint(attempt-2))*5) * time.Second // 5s, 10s, 20s
-			time.Sleep(backoff)
+			time.Sleep(uploadBackoff(attempt-2, lastErr))
 		}
 
 		// Step 1: Get the best server
@@ -100,6 +98,12 @@ func (u *GoFileUploader) UploadWithProgress(filePath string, progress ProgressFu
 		downloadLink, err = u.uploadFile(server, filePath, progress)
 		if err != nil {
 			lastErr = fmt.Errorf("upload file: %w", err)
+			if isUploadRateLimited(err) {
+				// Rate limit — backoff and clear lastErr to avoid double-sleep next iteration
+				time.Sleep(uploadBackoff(attempt, err))
+				lastErr = nil
+				continue
+			}
 			if attempt < maxAttempts {
 				continue
 			}
@@ -178,8 +182,8 @@ func (u *GoFileUploader) uploadFile(server, filePath string, progress ProgressFu
 		}
 		progressFile := NewProgressReaderWithCallback(file, fileSize, "GoFile", progress)
 
-		// Use a larger buffer for faster copying (1MB chunks)
-		buf := make([]byte, 1024*1024)
+		// Use a larger buffer for faster copying (4MB chunks)
+		buf := make([]byte, 4*1024*1024)
 		if _, err := io.CopyBuffer(part, progressFile, buf); err != nil {
 			errChan <- fmt.Errorf("copy file: %w", err)
 			writer.Close()
