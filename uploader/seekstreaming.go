@@ -1,6 +1,7 @@
 package uploader
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,12 +10,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // seekStreamingSem limits concurrent uploads to SeekStreaming.
 const seekStreamingSemCap = 3
+
+// seekStreamingChunkSize is the maximum bytes sent in a single TUS PATCH
+// request. Splitting uploads into chunks avoids Cloudflare's 100-second proxy
+// timeout on the upstream server, which causes a 502 Bad Gateway for large
+// files sent as a single monolithic PATCH body.
+const seekStreamingChunkSize = 50 * 1024 * 1024 // 50 MB
 
 var seekStreamingSem = make(chan struct{}, seekStreamingSemCap)
 
@@ -207,42 +215,106 @@ func (u *SeekStreamingUploader) uploadFileTUS(uploadURL, filePath string, progre
 	fi, _ := os.Stat(filePath)
 	fileSize := fi.Size()
 
-	pr := NewProgressReaderWithCallback(f, fileSize, "SeekStreaming", progress)
-
-	req, err := http.NewRequest("PATCH", uploadURL, pr)
+	offset, err := u.getTUSOffset(uploadURL)
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return "", fmt.Errorf("get offset: %w", err)
+	}
+
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return "", fmt.Errorf("seek to offset %d: %w", offset, err)
+		}
+	}
+
+	buf := make([]byte, seekStreamingChunkSize)
+	for offset < fileSize {
+		chunkSize := int64(seekStreamingChunkSize)
+		if remaining := fileSize - offset; remaining < chunkSize {
+			chunkSize = remaining
+		}
+
+		n, err := io.ReadFull(f, buf[:chunkSize])
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return "", fmt.Errorf("read chunk at offset %d: %w", offset, err)
+		}
+		if int64(n) == 0 {
+			break
+		}
+
+		chunkBody := bytes.NewReader(buf[:n])
+		req, err := http.NewRequest("PATCH", uploadURL, chunkBody)
+		if err != nil {
+			return "", fmt.Errorf("create patch request: %w", err)
+		}
+		req.Header.Set("Tus-Resumable", "1.0.0")
+		req.Header.Set("Content-Type", "application/offset+octet-stream")
+		req.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
+		req.ContentLength = int64(n)
+		req.Header.Set("User-Agent", defaultUserAgent)
+
+		resp, err := u.client.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("tus upload chunk at offset %d: %w", offset, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("tus upload status %d at offset %d: %s", resp.StatusCode, offset, string(body))
+		}
+
+		newOffset := resp.Header.Get("Upload-Offset")
+		if newOffset != "" {
+			offset, err = strconv.ParseInt(newOffset, 10, 64)
+			if err != nil {
+				return "", fmt.Errorf("parse upload-offset header: %w", err)
+			}
+		} else {
+			offset += int64(n)
+		}
+
+		if progress != nil {
+			progress("SeekStreaming", offset, fileSize)
+		}
+	}
+
+	parts := strings.Split(strings.TrimRight(uploadURL, "/"), "/")
+	return parts[len(parts)-1], nil
+}
+
+// getTUSOffset performs a TUS HEAD request to determine how many bytes have
+// already been uploaded. Returns 0 for new or unknown uploads.
+func (u *SeekStreamingUploader) getTUSOffset(uploadURL string) (int64, error) {
+	req, err := http.NewRequest("HEAD", uploadURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create head request: %w", err)
 	}
 	req.Header.Set("Tus-Resumable", "1.0.0")
-	req.Header.Set("Content-Type", "application/offset+octet-stream")
-	req.Header.Set("Upload-Offset", "0")
 	req.Header.Set("User-Agent", defaultUserAgent)
 
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("tus upload: %w", err)
+		return 0, fmt.Errorf("head request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode == http.StatusNoContent {
-		parts := strings.Split(strings.TrimRight(uploadURL, "/"), "/")
-		return parts[len(parts)-1], nil
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return 0, nil
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return 0, nil
 	}
 
-	if resp.StatusCode == http.StatusOK {
-		var result struct {
-			VideoID string `json:"videoId"`
-		}
-		if err := json.Unmarshal(body, &result); err == nil && result.VideoID != "" {
-			return result.VideoID, nil
-		}
-		parts := strings.Split(strings.TrimRight(uploadURL, "/"), "/")
-		return parts[len(parts)-1], nil
+	offsetStr := resp.Header.Get("Upload-Offset")
+	if offsetStr == "" {
+		return 0, nil
 	}
 
-	return "", fmt.Errorf("tus upload status %d: %s", resp.StatusCode, string(body))
+	offset, err := strconv.ParseInt(offsetStr, 10, 64)
+	if err != nil {
+		return 0, nil
+	}
+	return offset, nil
 }
 
 func ExtractSeekStreamingVideoID(embedURL string) string {

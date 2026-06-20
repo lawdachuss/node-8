@@ -17,17 +17,17 @@ const (
 
 // ChannelConfig represents the configuration for a channel.
 type ChannelConfig struct {
-	IsPaused                  atomic.Bool `json:"-"`
-	Site                      string      `json:"site"`       // "chaturbate" or "stripchat"
-	Username                  string      `json:"username"`
-	Framerate                 int         `json:"framerate"`
-	Resolution                int         `json:"resolution"`
-	Pattern                   string      `json:"pattern"`
-	MaxDuration               int         `json:"max_duration"`
-	MaxFilesize               int         `json:"max_filesize"`
-	Compress                  bool        `json:"compress"`
-	MinDurationBeforeUpload   int         `json:"min_duration_before_upload"` // seconds; 0 = disabled
-	CreatedAt                 int64       `json:"created_at"`
+	IsPaused                atomic.Bool `json:"-"`
+	Site                    string      `json:"site"` // "chaturbate" or "stripchat"
+	Username                string      `json:"username"`
+	Framerate               int         `json:"framerate"`
+	Resolution              int         `json:"resolution"`
+	Pattern                 string      `json:"pattern"`
+	MaxDuration             int         `json:"max_duration"`
+	MaxFilesize             int         `json:"max_filesize"`
+	Compress                bool        `json:"compress"`
+	MinDurationBeforeUpload int         `json:"min_duration_before_upload"` // seconds; 0 = disabled
+	CreatedAt               int64       `json:"created_at"`
 }
 
 func (c *ChannelConfig) Sanitize() {
@@ -53,22 +53,22 @@ func (c *ChannelConfig) Sanitize() {
 // ChannelInfo represents the information about a channel,
 // mostly used for the template rendering.
 type ChannelInfo struct {
-	IsOnline      bool
-	IsConnecting  bool
-	IsPaused      bool
-	IsCompressing bool
-	RoomStatus    string // public, private, group, away, offline, hidden
-	Username      string
-	Site          string // "chaturbate" or "stripchat"
-	SiteDomain    string // domain for channel link, e.g. "https://chaturbate.com/"
-	LiveThumbURL  string // live-updating thumbnail; empty = use platform default
-	Duration      string
-	Filesize      string
-	Filename      string
-	StreamedAt    string
-	MaxDuration   string
-	MaxFilesize   string
-	CreatedAt     int64
+	IsOnline       bool
+	IsConnecting   bool
+	IsPaused       bool
+	IsCompressing  bool
+	RoomStatus     string // public, private, group, away, offline, hidden
+	Username       string
+	Site           string // "chaturbate" or "stripchat"
+	SiteDomain     string // domain for channel link, e.g. "https://chaturbate.com/"
+	LiveThumbURL   string // live-updating thumbnail; empty = use platform default
+	Duration       string
+	Filesize       string
+	Filename       string
+	StreamedAt     string
+	MaxDuration    string
+	MaxFilesize    string
+	CreatedAt      int64
 	Logs           []string
 	GlobalConfig   *Config // for nested template to access $.Config
 	UploadStatus   string  // human-readable upload status (empty = idle)
@@ -92,8 +92,8 @@ type UploadEntry struct {
 	Filename     string      `json:"filename"`      // file being uploaded
 	Status       string      `json:"status"`        // human-readable status
 	Progress     float64     `json:"progress"`      // 0–100
-	HostCount    int         `json:"host_count"`     // how many hosts completed
-	HostTotal    int         `json:"host_total"`     // total hosts to upload to
+	HostCount    int         `json:"host_count"`    // how many hosts completed
+	HostTotal    int         `json:"host_total"`    // total hosts to upload to
 	BytesCurrent int64       `json:"bytes_current"` // total bytes uploaded so far across all hosts
 	BytesTotal   int64       `json:"bytes_total"`   // total file size
 	Speed        string      `json:"speed"`         // formatted aggregate speed, e.g. "3.2 MB/s"
@@ -159,18 +159,18 @@ type Config struct {
 	OutputDir               string
 	PerModelFolder          bool
 	DeleteLocalAfterUpload  bool
-	MinDurationBeforeUpload  int  // seconds; 0 = disabled; videos shorter than this are deferred for merge
-	OrphanCleanupInterval   int  // minutes between periodic orphan/thumbnail sweeps (0 = disabled)
-	DiskWarningPercent      int  // log warning when disk usage exceeds this (0 = disabled, default 80)
-	DiskCriticalPercent     int  // auto-delete oldest recordings when disk exceeds this (0 = disabled, default 90)
-	MaxLocalAgeDays         int  // delete local files older than N days if uploaded (0 = disabled)
+	MinDurationBeforeUpload int // seconds; 0 = disabled; videos shorter than this are deferred for merge
+	OrphanCleanupInterval   int // minutes between periodic orphan/thumbnail sweeps (0 = disabled)
+	DiskWarningPercent      int // log warning when disk usage exceeds this (0 = disabled, default 80)
+	DiskCriticalPercent     int // auto-delete oldest recordings when disk exceeds this (0 = disabled, default 90)
+	MaxLocalAgeDays         int // delete local files older than N days if uploaded (0 = disabled)
 
-	VoeSXAPIKey        string
-	StreamtapeLogin    string
-	StreamtapeKey      string
-	MixdropEmail       string
-	MixdropToken       string
-	SeekStreamingKey    string
+	VoeSXAPIKey      string
+	StreamtapeLogin  string
+	StreamtapeKey    string
+	MixdropEmail     string
+	MixdropToken     string
+	SeekStreamingKey string
 
 	SupabaseURL    string
 	SupabaseAPIKey string
@@ -179,6 +179,6 @@ type Config struct {
 
 	FFmpegPath string
 
-	SessionDuration string // recording session length (e.g. "5h20m0s"); empty = disabled (continuous recording)
+	SessionDuration       string        // recording session length (e.g. "5h20m0s"); empty = disabled (continuous recording)
 	SessionDurationParsed time.Duration // parsed from SessionDuration; 0 = disabled
 }

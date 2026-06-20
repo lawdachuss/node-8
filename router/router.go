@@ -1,26 +1,27 @@
 package router
 
 import (
-        "embed"
-        "fmt"
-        "html/template"
-        "log"
-        "path/filepath"
-        "strings"
+	"embed"
+	"fmt"
+	"html/template"
+	"log"
+	"path/filepath"
+	"strings"
 
-        "github.com/gin-gonic/gin"
-        "github.com/teacat/chaturbate-dvr/router/view"
-        "github.com/teacat/chaturbate-dvr/server"
+	"github.com/gin-gonic/gin"
+	"github.com/teacat/chaturbate-dvr/entity"
+	"github.com/teacat/chaturbate-dvr/router/view"
+	"github.com/teacat/chaturbate-dvr/server"
 )
 
 // SetupRouter initializes and returns the Gin router.
 func SetupRouter() *gin.Engine {
-        gin.SetMode(gin.ReleaseMode)
+	gin.SetMode(gin.ReleaseMode)
 
-        r := gin.Default()
-        if err := LoadHTMLFromEmbedFS(r, view.FS, "templates/index.html", "templates/channel_info.html", "templates/videos.html", "templates/video.html", "templates/channel.html"); err != nil {
-                log.Fatalf("failed to load HTML templates: %v", err)
-        }
+	r := gin.Default()
+	if err := LoadHTMLFromEmbedFS(r, view.FS, "templates/index.html", "templates/channel_info.html", "templates/videos.html", "templates/video.html", "templates/channel.html", "templates/admin.html"); err != nil {
+		log.Fatalf("failed to load HTML templates: %v", err)
+	}
 
 	// Apply authentication if configured
 	SetupAuth(r)
@@ -29,17 +30,17 @@ func SetupRouter() *gin.Engine {
 	// Register views
 	SetupViews(r)
 
-        return r
+	return r
 }
 
 // SetupAuth applies basic authentication if credentials are provided.
 func SetupAuth(r *gin.Engine) {
-        if server.Config.AdminUsername != "" && server.Config.AdminPassword != "" {
-                auth := gin.BasicAuth(gin.Accounts{
-                        server.Config.AdminUsername: server.Config.AdminPassword,
-                })
-                r.Use(auth)
-        }
+	if server.Config.AdminUsername != "" && server.Config.AdminPassword != "" {
+		auth := gin.BasicAuth(gin.Accounts{
+			server.Config.AdminUsername: server.Config.AdminPassword,
+		})
+		r.Use(auth)
+	}
 }
 
 func init() {
@@ -48,39 +49,40 @@ func init() {
 
 // SetupStatic serves static frontend files with aggressive browser caching.
 func SetupStatic(r *gin.Engine) {
-        fs, err := view.StaticFS()
-        if err != nil {
-                log.Fatalf("failed to initialize static files: %v", err)
-        }
-        // Cache static assets for 24 h — avoids repeat downloads on every page load.
-        r.Use(func(c *gin.Context) {
-                if strings.HasPrefix(c.Request.URL.Path, "/static/") {
-                        c.Header("Cache-Control", "public, max-age=86400")
-                }
-                c.Next()
-        })
-        r.StaticFS("/static", fs)
+	fs, err := view.StaticFS()
+	if err != nil {
+		log.Fatalf("failed to initialize static files: %v", err)
+	}
+	// Cache static assets for 24 h — avoids repeat downloads on every page load.
+	r.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
+			c.Header("Cache-Control", "public, max-age=86400")
+		}
+		c.Next()
+	})
+	r.StaticFS("/static", fs)
 }
 
 // setupViews registers HTML templates and view handlers.
 func SetupViews(r *gin.Engine) {
-        r.GET("/", Index)
-        r.GET("/updates", Updates)
-        r.GET("/videos", Videos)
-        r.GET("/video", VideoDetail)
-        r.GET("/channel", ChannelVideos)
-        r.GET("/play", Play)
-        r.GET("/download", Download)
-        r.POST("/delete_video", DeleteVideo)
-        r.POST("/delete_video_db", DeleteVideoRecord)
-        r.POST("/update_config", UpdateConfig)
-        r.POST("/create_channel", CreateChannel)
-        r.GET("/stop_channel/:username", StopChannel)
-        r.POST("/stop_channel/:username", StopChannel)
-        r.GET("/pause_channel/:username", PauseChannel)
-        r.POST("/pause_channel/:username", PauseChannel)
-        r.GET("/resume_channel/:username", ResumeChannel)
-        r.POST("/resume_channel/:username", ResumeChannel)
+	r.GET("/", Index)
+	r.GET("/admin", AdminPage)
+	r.GET("/updates", Updates)
+	r.GET("/videos", Videos)
+	r.GET("/video", VideoDetail)
+	r.GET("/channel", ChannelVideos)
+	r.GET("/play", Play)
+	r.GET("/download", Download)
+	r.POST("/delete_video", DeleteVideo)
+	r.POST("/delete_video_db", DeleteVideoRecord)
+	r.POST("/update_config", UpdateConfig)
+	r.POST("/create_channel", CreateChannel)
+	r.GET("/stop_channel/:username", StopChannel)
+	r.POST("/stop_channel/:username", StopChannel)
+	r.GET("/pause_channel/:username", PauseChannel)
+	r.POST("/pause_channel/:username", PauseChannel)
+	r.GET("/resume_channel/:username", ResumeChannel)
+	r.POST("/resume_channel/:username", ResumeChannel)
 
 	// Tunnel API
 	r.GET("/api/tunnel", GetTunnel)
@@ -104,21 +106,47 @@ func SetupViews(r *gin.Engine) {
 
 // LoadHTMLFromEmbedFS loads specific HTML templates from an embedded filesystem and registers them with Gin.
 func LoadHTMLFromEmbedFS(r *gin.Engine, embeddedFS embed.FS, files ...string) error {
-        templ := template.New("").Funcs(template.FuncMap{
-                "printf": fmt.Sprintf,
-        })
-        for _, file := range files {
-                content, err := embeddedFS.ReadFile(file)
-                if err != nil {
-                        return err
-                }
-                _, err = templ.New(filepath.Base(file)).Parse(string(content))
-                if err != nil {
-                        return err
-                }
-        }
+	templ := template.New("").Funcs(template.FuncMap{
+		"printf": fmt.Sprintf,
+		"subOnline": func(chs []*entity.ChannelInfo) int {
+			n := 0
+			for _, ch := range chs {
+				if ch.IsOnline && !ch.IsPaused {
+					n++
+				}
+			}
+			return n
+		},
+		"subFailed": func(entries []entity.PendingEntry) int {
+			n := 0
+			for _, e := range entries {
+				if e.Failed {
+					n++
+				}
+			}
+			return n
+		},
+		"orphSize": func(orphans []orphanEntry) string {
+			var s int64
+			for _, o := range orphans {
+				s += o.Size
+			}
+			return fmt.Sprintf("%.1f MB", float64(s)/1024/1024)
+		},
+		"divBytes": func(b int64) float64 { return float64(b) / 1024 / 1024 },
+	})
+	for _, file := range files {
+		content, err := embeddedFS.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		_, err = templ.New(filepath.Base(file)).Parse(string(content))
+		if err != nil {
+			return err
+		}
+	}
 
-        // Set the parsed templates as the HTML renderer for Gin
-        r.SetHTMLTemplate(templ)
-        return nil
+	// Set the parsed templates as the HTML renderer for Gin
+	r.SetHTMLTemplate(templ)
+	return nil
 }

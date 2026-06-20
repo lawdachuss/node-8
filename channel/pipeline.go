@@ -513,18 +513,17 @@ func (p *Pipeline) stageCleanup(ch *Channel) error {
 	}
 
 	ch.Info("cleanup: removing local files for %s", p.Filename)
-	if err := removeFileWithRetry(p.FilePath, 10); err != nil {
-		ch.Error("cleanup: could not remove %s after 10 attempts: %v", p.Filename, err)
-		p.LastError = err.Error()
-		return err
-	}
 	DeleteSidecarFiles(p.FilePath)
+	if err := removeFileWithRetry(p.FilePath); err != nil {
+		ch.Warn("cleanup: could not remove %s (will retry on next run): %v", p.Filename, err)
+	} else {
+		ch.Info("cleanup: removed %s", p.Filename)
+	}
 	if p.FileHash != "" {
 		if jErr := server.DeleteJournalByHash(p.FileHash); jErr != nil {
 			ch.Warn("cleanup: could not delete journal for %s: %v", p.Filename, jErr)
 		}
 	}
-	ch.Info("cleanup: removed local files for %s", p.Filename)
 	return nil
 }
 
@@ -670,27 +669,28 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 				Error:    p.LastError,
 			})
 		}
-			if p.CurrentStage == StageDone || p.Failed {
-				if p.CurrentStage == StageDone {
-					if delErr := server.DeletePipelineState(p.FileHash); delErr != nil {
-						ch.Warn("pipeline: could not delete state for %s: %v", filename, delErr)
-					}
-				} else if p.Retries < maxPipelineRetries {
-					p.Retries++
-					if saveErr := server.SavePipelineState(p.toDBState()); saveErr != nil {
-						ch.Warn("pipeline: could not persist state for %s: %v", filename, saveErr)
-					}
-				} else {
-					// Retries exhausted — abandon the pipeline and clean up.
-					ch.Error("pipeline: %s failed %d times, abandoning", filename, p.Retries+1)
-					if delErr := server.DeletePipelineState(p.FileHash); delErr != nil {
-						ch.Warn("pipeline: could not delete abandoned state for %s: %v", filename, delErr)
-					}
+		if p.CurrentStage == StageDone || p.Failed {
+			if p.CurrentStage == StageDone {
+				if delErr := server.DeletePipelineState(p.FileHash); delErr != nil {
+					ch.Warn("pipeline: could not delete state for %s: %v", filename, delErr)
 				}
-				if m := server.Manager; m != nil {
-					m.PublishLog(ch.Config.Username, fmt.Sprintf("[pipeline] %s finished (stage=%s, failed=%v, retries=%d)", filename, p.CurrentStage, p.Failed, p.Retries))
+			} else if p.Retries < maxPipelineRetries {
+				p.Retries++
+				if saveErr := server.SavePipelineState(p.toDBState()); saveErr != nil {
+					ch.Warn("pipeline: could not persist state for %s: %v", filename, saveErr)
 				}
+			} else {
+				// Retries exhausted — abandon the pipeline and clean up.
+				ch.Error("pipeline: %s failed %d times, abandoning", filename, p.Retries+1)
+				if delErr := server.DeletePipelineState(p.FileHash); delErr != nil {
+					ch.Warn("pipeline: could not delete abandoned state for %s: %v", filename, delErr)
+				}
+				deleteLocalFile(ch, filename, p.FilePath)
 			}
+			if m := server.Manager; m != nil {
+				m.PublishLog(ch.Config.Username, fmt.Sprintf("[pipeline] %s finished (stage=%s, failed=%v, retries=%d)", filename, p.CurrentStage, p.Failed, p.Retries))
+			}
+		}
 	}()
 
 	defer func() {
@@ -748,12 +748,14 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 			ch.Error("pipeline: upload stage failed for %s: %v", filename, uploadErr)
 			p.Failed = true
 			p.LastError = uploadErr.Error()
+			deleteLocalFile(ch, filename, p.FilePath)
 			return
 		}
 		if len(p.Links) == 0 {
 			ch.Error("pipeline: upload stage produced no links for %s", filename)
 			p.Failed = true
 			p.LastError = "upload produced no links"
+			deleteLocalFile(ch, filename, p.FilePath)
 			return
 		}
 
@@ -989,5 +991,20 @@ func formatSpeed(bytesPerSec float64) string {
 		return fmt.Sprintf("%.0f KB/s", bytesPerSec/1_000)
 	default:
 		return fmt.Sprintf("%.0f B/s", bytesPerSec)
+	}
+}
+
+// deleteLocalFile attempts to remove a local video file with retry.  Used by
+// pipeline failure paths to prevent disk filling when uploads fail or the
+// pipeline is abandoned.
+func deleteLocalFile(ch *Channel, filename, filePath string) {
+	if filePath == "" {
+		return
+	}
+	DeleteSidecarFiles(filePath)
+	if err := removeFileWithRetry(filePath); err != nil {
+		ch.Warn("pipeline: could not remove %s after failure: %v", filename, err)
+	} else {
+		ch.Info("pipeline: removed %s despite pipeline failure", filename)
 	}
 }

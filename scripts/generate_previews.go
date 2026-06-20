@@ -145,7 +145,6 @@ func supabasePost(path string, body interface{}) error {
 	return nil
 }
 
-
 func downloadWithYtDlp(pageURL, workDir, filename string) (string, error) {
 	if _, lookErr := exec.LookPath("yt-dlp"); lookErr != nil {
 		return "", fmt.Errorf("yt-dlp not found in PATH")

@@ -231,9 +231,9 @@ func New(c *cli.Context) (*entity.Config, error) {
 		MixdropToken:            c.String("mixdrop-token"),
 		SeekStreamingKey:        c.String("seekstreaming-key"),
 
-		SupabaseURL:             c.String("supabase-url"),
-		SupabaseAPIKey:          c.String("supabase-api-key"),
-		StripchatPDKey:          c.String("stripchat-pdkey"),
+		SupabaseURL:    c.String("supabase-url"),
+		SupabaseAPIKey: c.String("supabase-api-key"),
+		StripchatPDKey: c.String("stripchat-pdkey"),
 	}
 
 	// If user provided a custom ffmpeg path, set it globally

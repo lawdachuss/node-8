@@ -20,8 +20,8 @@ func TestUpdateConfigAcceptsJSON(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 
 	body, err := json.Marshal(map[string]string{
-		"cookies":     "cf_clearance=test_cf; sessionid=test; csrftoken=abc123",
-		"user_agent":  "TestAgent/1.0",
+		"cookies":    "cf_clearance=test_cf; sessionid=test; csrftoken=abc123",
+		"user_agent": "TestAgent/1.0",
 	})
 	if err != nil {
 		t.Fatal(err)

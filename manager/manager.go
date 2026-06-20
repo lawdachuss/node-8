@@ -494,17 +494,25 @@ func (m *Manager) StopWithProcessingQueue(workers int) {
 		return true
 	})
 
-	m.CancelAllChannels() // all stop recording now (fair)
+	m.CancelAllChannels()
 	m.StopWatcher()
 
 	log.Printf("[session] waiting for %d channels to close recordings...", len(chs))
-	m.WaitForAllChannels() // monitors exit → Cleanup(CloseQueue) → fast file close, no processing
+	m.WaitForAllChannels()
 
 	if len(chs) == 0 {
 		return
 	}
 
 	log.Printf("[session] processing %d channels with %d worker(s)...", len(chs), workers)
+
+	// Publish a status log to each channel so the UI shows what's happening.
+	for _, ch := range chs {
+		ch.Info("session stopped — processing pending files (mux, compress, upload)")
+	}
+
+	// Broadcast upload state so the frontend activates the upload bar.
+	m.PublishUploadState()
 
 	// Progress ticker
 	processingDone := make(chan struct{})
@@ -528,7 +536,7 @@ func (m *Manager) StopWithProcessingQueue(workers int) {
 	var wg sync.WaitGroup
 
 	for _, ch := range chs {
-		sem <- struct{}{} // acquire worker slot (blocks if all workers busy)
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(ch *channel.Channel) {
 			defer wg.Done()
@@ -538,14 +546,20 @@ func (m *Manager) StopWithProcessingQueue(workers int) {
 					log.Printf("[session] PANIC processing channel %s: %v", ch.Config.Username, r)
 				}
 			}()
-			start := time.Now()
-			log.Printf("[session] processing channel %s...", ch.Config.Username)
+			ch.Info("processing pending files...")
 			ch.ProcessPending()
-			log.Printf("[session] channel %s done in %v", ch.Config.Username, time.Since(start).Round(time.Second))
+
+			// Pause the channel so it moves to the "Paused" section in the UI
+			// and logs reflect the completed state.
+			ch.Pause()
+			ch.Info("channel paused — ready for next session")
 		}(ch)
 	}
 
 	wg.Wait()
+
+	// Final broadcast so upload bar hides when all processing is done.
+	m.PublishUploadState()
 }
 
 // StartSession begins the automatic recording-session lifecycle.

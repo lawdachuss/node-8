@@ -67,8 +67,8 @@ func InvalidateAllCaches() {
 // ─── Page cache tracking ────────────────────────────────────────────────────
 
 var (
-	pageMu      sync.RWMutex
-	pageCached  = map[string]bool{}
+	pageMu     sync.RWMutex
+	pageCached = map[string]bool{}
 )
 
 const pageCacheDuration = 60 * time.Second

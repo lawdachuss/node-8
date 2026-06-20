@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/static/styles/app.css?v=5" />
+    <link rel="dns-prefetch" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preload" as="style" onload="this.onload=null;this.rel='stylesheet'"
+          href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Outfit:wght@400;500;600;700;800;900&display=swap" />
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Outfit:wght@400;500;600;700;800;900&display=swap" /></noscript>
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16x16.png">
+    <link rel="manifest" href="/static/site.webmanifest">
+    <title>Admin — StreamBate</title>
+    <script>
+        (function(){
+            if (localStorage.getItem('darkMode') === 'true' ||
+                (localStorage.getItem('darkMode') === null && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                document.documentElement.classList.add('dark');
+            }
+        })();
+    </script>
+    <style>
+        :root {
+            --bg-body: #0a0a0c;
+            --bg-surface: #121216;
+            --bg-card: #1a1a20;
+            --bg-input: rgba(255,255,255,0.04);
+            --text-primary: #e4e4e7;
+            --text-secondary: #a1a1aa;
+            --text-muted: #52525b;
+            --border-color: rgba(255,255,255,0.06);
+            --border-subtle: rgba(255,255,255,0.08);
+            --accent: #d4a053;
+            --accent-glow: rgba(212,160,83,0.3);
+        }
+        html:not(.dark) {
+            --bg-body: #f4f4f5;
+            --bg-surface: #ffffff;
+            --bg-card: #fafafa;
+            --bg-input: #f4f4f5;
+            --text-primary: #18181b;
+            --text-secondary: #52525b;
+            --text-muted: #a1a1aa;
+            --border-color: #e4e4e7;
+            --border-subtle: #d4d4d8;
+        }
+        body {
+            font-family: 'DM Sans', system-ui, sans-serif;
+            background: var(--bg-body);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .admin-layout {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 24px 32px;
+        }
+
+        /* ── Header ── */
+        .admin-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 28px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .admin-header h1 {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 800;
+            font-size: 22px;
+            margin: 0;
+        }
+        .admin-header .nav-links {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        .admin-header .nav-links a {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 6px 14px;
+            border-radius: 8px;
+            background: var(--bg-input);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+        .admin-header .nav-links a:hover {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        /* ── Metrics Grid ── */
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 28px;
+        }
+        .metric-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+        }
+        .metric-card .label {
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+        .metric-card .value {
+            font-size: 24px;
+            font-weight: 800;
+            font-family: 'Outfit', sans-serif;
+        }
+        .metric-card .sub {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        /* ── Sections ── */
+        .section {
+            margin-bottom: 28px;
+        }
+        .section-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 16px;
+            font-weight: 700;
+            margin: 0 0 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .section-title .count {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            background: var(--bg-input);
+            padding: 2px 8px;
+            border-radius: 6px;
+        }
+
+        /* ── Tables ── */
+        .table-wrap {
+            overflow-x: auto;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+        }
+        table.admin-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        table.admin-table th {
+            text-align: left;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-color);
+            white-space: nowrap;
+        }
+        table.admin-table td {
+            padding: 8px 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            vertical-align: middle;
+        }
+        table.admin-table tr:last-child td { border-bottom: none; }
+        table.admin-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+        .status-badge {
+            display: inline-block;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .status-badge.active { background: rgba(16,185,129,0.15); color: #10b981; }
+        .status-badge.pending { background: rgba(245,158,11,0.15); color: #f59e0b; }
+        .status-badge.done { background: rgba(59,130,246,0.15); color: #3b82f6; }
+        .status-badge.failed { background: rgba(239,68,68,0.15); color: #ef4444; }
+        .status-badge.orphan { background: rgba(168,85,247,0.15); color: #a855f7; }
+
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            border-radius: 2px;
+            background: rgba(255,255,255,0.06);
+            overflow: hidden;
+            margin-top: 3px;
+        }
+        .progress-bar .fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s;
+        }
+        .progress-bar .fill.ok { background: var(--accent); }
+        .progress-bar .fill.good { background: #10b981; }
+        .progress-bar .fill.warn { background: #f59e0b; }
+
+        .host-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 3px;
+        }
+        .host-tag {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            background: var(--bg-input);
+            color: var(--text-secondary);
+        }
+        .host-tag.ok { background: rgba(16,185,129,0.12); color: #10b981; }
+        .host-tag.fail { background: rgba(239,68,68,0.12); color: #ef4444; }
+
+        .mono { font-family: ui-monospace, monospace; font-size: 11px; }
+        .truncate { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .orphan-actions {
+            display: flex;
+            gap: 6px;
+        }
+        .orphan-actions button {
+            font-size: 10px;
+            padding: 3px 10px;
+            border-radius: 5px;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .btn-retry { background: var(--accent); color: #fff; }
+        .btn-retry:hover { opacity: 0.85; }
+        .btn-delete { background: rgba(239,68,68,0.15); color: #ef4444; }
+        .btn-delete:hover { background: rgba(239,68,68,0.25); }
+
+        .empty-state {
+            padding: 24px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        .btn-action {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            background: rgba(255,255,255,0.06);
+            color: var(--text-secondary);
+            transition: background 0.15s;
+        }
+        .btn-action:hover { background: rgba(255,255,255,0.12); }
+        .btn-action-del:hover { background: rgba(239,68,68,0.2); color: #ef4444; }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 8px;
+        }
+        .detail-item {
+            font-size: 11px;
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: var(--bg-input);
+        }
+        .detail-item .label {
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+        }
+        .detail-item .val {
+            font-family: ui-monospace, monospace;
+            font-size: 12px;
+            margin-top: 1px;
+            word-break: break-all;
+        }
+
+        .section-toggle {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin-left: 8px;
+        }
+        .section-toggle:hover { background: var(--bg-input); color: var(--text-primary); }
+
+        .filter-input {
+            width: 100%;
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            font-size: 12px;
+            outline: none;
+            box-sizing: border-box;
+            margin-bottom: 8px;
+        }
+        .filter-input:focus { border-color: var(--accent); }
+
+        .disk-bar {
+            height: 6px;
+            border-radius: 3px;
+            background: var(--bg-input);
+            overflow: hidden;
+            margin: 6px 0 2px;
+        }
+        .disk-bar .fill {
+            height: 100%;
+            border-radius: 3px;
+        }
+
+        @media (max-width: 768px) {
+            .admin-layout { padding: 12px 16px; }
+            .metrics { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+        }
+    </style>
+</head>
+<body>
+<div class="admin-layout">
+
+    <!-- ════════ HEADER ════════ -->
+    <div class="admin-header">
+        <h1>Admin Dashboard</h1>
+        <div class="nav-links">
+            {{ if .TunnelURL }}
+            <a href="{{ .TunnelURL }}" target="_blank" title="{{ .TunnelURL }}"
+               style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🔗 Tunnel</a>
+            {{ end }}
+            <a href="/">← Dashboard</a>
+            <a href="/videos">Videos</a>
+            <span style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:4px">
+                <input type="checkbox" id="auto-refresh" onchange="toggleAutoRefresh()"
+                       style="accent-color:var(--accent);margin:0;width:14px;height:14px">
+                <label for="auto-refresh" style="cursor:pointer">Auto</label>
+            </span>
+            <a href="javascript:void(0)" onclick="location.reload()">Refresh</a>
+        </div>
+    </div>
+
+    <!-- ════════ METRICS ════════ -->
+    <div class="metrics">
+        <div class="metric-card">
+            <div class="label">Channels</div>
+            <div class="value">{{ len .Channels }}</div>
+            <div class="sub">{{ subOnline .Channels }} online</div>
+        </div>
+        <div class="metric-card">
+            <div class="label">Active Uploads</div>
+            <div class="value">{{ len .Uploads.Active }}</div>
+            <div class="sub">{{ len .Uploads.Pending }} pending</div>
+        </div>
+        <div class="metric-card">
+            <div class="label">Pipeline History</div>
+            <div class="value">{{ len .Uploads.History }}</div>
+            <div class="sub">{{ subFailed .Uploads.History }} failed</div>
+        </div>
+        <div class="metric-card">
+            <div class="label">Orphan Files</div>
+            <div class="value">{{ len .Orphans }}</div>
+            <div class="sub">{{ orphSize .Orphans }} total</div>
+        </div>
+        <div class="metric-card">
+            <div class="label">Disk</div>
+            <div class="value">{{ .Disk.Used }}</div>
+            <div class="sub">{{ .Disk.Free }} free of {{ .Disk.Total }}</div>
+        </div>
+        <div class="metric-card">
+            <div class="label">Session</div>
+            <div class="value" style="font-size:18px">
+                {{ if .SessionActive }}
+                <span class="status-badge pending" style="font-size:11px">Active</span>
+                {{ else }}
+                <span class="status-badge" style="font-size:11px;background:rgba(113,113,122,0.12);color:#71717a">Inactive</span>
+                {{ end }}
+            </div>
+            <div class="sub">
+                {{ if .SessionActive }}
+                {{ .SessionRemaining }} left · {{ .SessionDuration }} total
+                {{ else }}
+                No active session
+                {{ end }}
+            </div>
+        </div>
+    </div>
+
+    <!-- ════════ CHANNELS TABLE ════════ -->
+    <div class="section">
+        <h2 class="section-title">Channels <span class="count">{{ len .Channels }}</span></h2>
+        <div class="table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Channel</th>
+                        <th>Site</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Filesize</th>
+                        <th>Filename</th>
+                        <th>Queued</th>
+                        <th>Failed</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ if .Channels }}
+                    {{ range $ch := .Channels }}
+                    {{ $pc := index $.PipelineMap $ch.Username }}
+                    <tr>
+                        <td><strong>{{ $ch.Username }}</strong></td>
+                        <td>{{ $ch.Site }}</td>
+                        <td>
+                            {{ if and $ch.IsOnline (not $ch.IsPaused) }}
+                                <span class="status-badge active">Recording</span>
+                            {{ else if $ch.IsPaused }}
+                                <span class="status-badge pending">Paused</span>
+                            {{ else if $ch.IsConnecting }}
+                                <span class="status-badge pending">Connecting</span>
+                            {{ else }}
+                                <span class="status-badge" style="background:rgba(113,113,122,0.12);color:#71717a">Offline</span>
+                            {{ end }}
+                        </td>
+                        <td class="mono">{{ $ch.Duration }}</td>
+                        <td class="mono">{{ $ch.Filesize }}</td>
+                        <td class="mono truncate" title="{{ $ch.Filename }}">{{ $ch.Filename }}</td>
+                        <td class="mono">{{ $pc.Queued }}</td>
+                        <td class="mono">{{ $pc.Failed }}</td>
+                        <td>
+                            {{ if $ch.IsPaused }}
+                            <button class="btn-action" onclick="channelAction('resume','{{ $ch.Username }}')" title="Resume">▶</button>
+                            {{ else }}
+                            <button class="btn-action" onclick="channelAction('pause','{{ $ch.Username }}')" title="Pause">⏸</button>
+                            {{ end }}
+                            <button class="btn-action btn-action-del" onclick="channelAction('stop','{{ $ch.Username }}')" title="Delete">✕</button>
+                        </td>
+                    </tr>
+                    {{ end }}
+                    {{ else }}
+                    <tr><td colspan="9" class="empty-state">No channels configured</td></tr>
+                    {{ end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ════════ ACTIVE UPLOADS ════════ -->
+    <div class="section">
+        <h2 class="section-title">Active Uploads <span class="count">{{ len .Uploads.Active }}</span></h2>
+        <div class="table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Channel</th>
+                        <th>File</th>
+                        <th>Status</th>
+                        <th>Progress</th>
+                        <th>Hosts</th>
+                        <th>Bytes</th>
+                        <th>Speed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ if .Uploads.Active }}
+                    {{ range .Uploads.Active }}
+                    <tr>
+                        <td><strong>{{ .Channel }}</strong></td>
+                        <td class="mono truncate" title="{{ .Filename }}">{{ .Filename }}</td>
+                        <td><span class="status-badge active">{{ .Status }}</span></td>
+                        <td style="min-width:140px">
+                            {{ printf "%.0f" .Progress }}%
+                            <div class="progress-bar"><div class="fill ok" style="width:{{ .Progress }}%"></div></div>
+                        </td>
+                        <td>
+                            <div class="host-list">
+                                <span class="host-tag">{{ .HostCount }}/{{ .HostTotal }} done</span>
+                                {{ range .Hosts }}
+                                <span class="host-tag {{ if eq .Status "done" }}ok{{ else if eq .Status "failed" }}fail{{ end }}"
+                                      title="{{ .Host }}: {{ printf "%.0f" .Progress }}%{{ if .Speed }} @ {{ .Speed }}{{ end }}">
+                                    {{ .Host }}
+                                </span>
+                                {{ end }}
+                            </div>
+                        </td>
+                        <td class="mono">{{ if gt .BytesTotal 0 }}{{ .BytesCurrent }}/{{ .BytesTotal }}{{ else }}—{{ end }}</td>
+                        <td class="mono">{{ if .Speed }}{{ .Speed }}{{ else }}—{{ end }}</td>
+                    </tr>
+                    {{ end }}
+                    {{ else }}
+                    <tr><td colspan="7" class="empty-state">No active uploads</td></tr>
+                    {{ end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ════════ PIPELINE QUEUE ════════ -->
+    <div class="section">
+        <h2 class="section-title">Pipeline Queue <span class="count">{{ len .Uploads.Pending }}</span></h2>
+        <div class="table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Channel</th>
+                        <th>File</th>
+                        <th>Stage</th>
+                        <th>Failed</th>
+                        <th>Error</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ if .Uploads.Pending }}
+                    {{ range .Uploads.Pending }}
+                    <tr>
+                        <td><strong>{{ .Channel }}</strong></td>
+                        <td class="mono truncate" title="{{ .Filename }}">{{ .Filename }}</td>
+                        <td><span class="status-badge pending">{{ .Stage }}</span></td>
+                        <td>{{ if .Failed }}<span class="status-badge failed">Yes</span>{{ else }}<span class="status-badge done">No</span>{{ end }}</td>
+                        <td class="mono" style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ .Error }}">{{ if .Error }}{{ .Error }}{{ else }}—{{ end }}</td>
+                    </tr>
+                    {{ end }}
+                    {{ else }}
+                    <tr><td colspan="5" class="empty-state">No pending pipelines</td></tr>
+                    {{ end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ════════ PIPELINE HISTORY ════════ -->
+    <div class="section">
+        <h2 class="section-title">Pipeline History <span class="count">{{ len .Uploads.History }}</span></h2>
+        <div class="table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Channel</th>
+                        <th>File</th>
+                        <th>Stage</th>
+                        <th>Result</th>
+                        <th>Error</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ if .Uploads.History }}
+                    {{ range .Uploads.History }}
+                    <tr>
+                        <td><strong>{{ .Channel }}</strong></td>
+                        <td class="mono truncate" title="{{ .Filename }}">{{ .Filename }}</td>
+                        <td><span class="status-badge done">{{ .Stage }}</span></td>
+                        <td>{{ if .Failed }}<span class="status-badge failed">Failed</span>{{ else }}<span class="status-badge done">OK</span>{{ end }}</td>
+                        <td class="mono" style="color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ .Error }}">{{ if .Error }}{{ .Error }}{{ else }}—{{ end }}</td>
+                    </tr>
+                    {{ end }}
+                    {{ else }}
+                    <tr><td colspan="5" class="empty-state">No pipeline history</td></tr>
+                    {{ end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ════════ SYSTEM HEALTH ════════ -->
+    <div class="section">
+        <h2 class="section-title">
+            System Health
+            <button class="section-toggle" onclick="toggleSection('health-content', this)">▼</button>
+        </h2>
+        <div id="health-content">
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <div class="label">Go Version</div>
+                    <div class="val">{{ .GoVersion }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Goroutines</div>
+                    <div class="val">{{ .GoGoroutines }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Memory (Heap)</div>
+                    <div class="val">{{ .GoMemoryMB }} MB</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">CPU Cores</div>
+                    <div class="val">{{ .GoNumCPU }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Uptime</div>
+                    <div class="val">{{ .Uptime }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">FFmpeg</div>
+                    <div class="val">
+                        {{ if .FFmpegFound }}
+                        <span class="status-badge active" style="font-size:10px">Available</span>
+                        {{ else }}
+                        <span class="status-badge failed" style="font-size:10px">Not found</span>
+                        {{ end }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ════════ CONFIGURATION ════════ -->
+    <div class="section">
+        <h2 class="section-title">
+            Configuration
+            <button class="section-toggle" onclick="toggleSection('config-content', this)">▼</button>
+        </h2>
+        <div id="config-content">
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <div class="label">Output Dir</div>
+                    <div class="val">{{ if .Config.OutputDir }}{{ .Config.OutputDir }}{{ else }}videos/{{ end }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Compress</div>
+                    <div class="val">{{ if .Config.Compress }}Yes{{ else }}No{{ end }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Delete After Upload</div>
+                    <div class="val">{{ if .Config.DeleteLocalAfterUpload }}Yes{{ else }}No{{ end }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Min Duration</div>
+                    <div class="val">{{ .Config.MinDurationBeforeUpload }}s</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Session Duration</div>
+                    <div class="val">{{ .Config.SessionDuration }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Per-Model Folder</div>
+                    <div class="val">{{ if .Config.PerModelFolder }}Yes{{ else }}No{{ end }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">FFmpeg Path</div>
+                    <div class="val">{{ if .Config.FFmpegPath }}{{ .Config.FFmpegPath }}{{ else }}default{{ end }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Port</div>
+                    <div class="val">{{ .Config.Port }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Orphan Cleanup Interval</div>
+                    <div class="val">{{ .Config.OrphanCleanupInterval }}m</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Max Local Age</div>
+                    <div class="val">{{ .Config.MaxLocalAgeDays }} days</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Disk Warning</div>
+                    <div class="val">{{ .Config.DiskWarningPercent }}%</div>
+                </div>
+                <div class="detail-item">
+                    <div class="label">Disk Critical</div>
+                    <div class="val">{{ .Config.DiskCriticalPercent }}%</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ════════ ORPHAN FILES ════════ -->
+    <div class="section">
+        <h2 class="section-title">Orphan Files <span class="count">{{ len .Orphans }}</span></h2>
+        <input type="text" class="filter-input" id="orphan-search" placeholder="Search orphan files..." oninput="filterOrphans()">
+        <div class="table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Filename</th>
+                        <th>Path</th>
+                        <th>Size</th>
+                        <th>Age</th>
+                        <th>Modified</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="orphans-tbody">
+                    {{ if .Orphans }}
+                    {{ range .Orphans }}
+                    <tr>
+                        <td class="mono truncate" title="{{ .Filename }}">{{ .Filename }}</td>
+                        <td class="mono truncate" title="{{ .Path }}" style="max-width:200px">{{ .Path }}</td>
+                        <td class="mono">{{ printf "%.1f" (divBytes .Size) }} MB</td>
+                        <td class="mono">{{ .Age }}</td>
+                        <td class="mono">{{ .ModTime }}</td>
+                        <td>
+                            <div class="orphan-actions">
+                                <button class="btn-retry" onclick="retryOrphan('{{ .Path }}', this)">Retry</button>
+                                <button class="btn-delete" onclick="deleteOrphan('{{ .Path }}', this)">Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {{ end }}
+                    {{ else }}
+                    <tr><td colspan="6" class="empty-state">No orphan files found</td></tr>
+                    {{ end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ════════ DISK ════════ -->
+    <div class="section">
+        <h2 class="section-title">Disk Usage</h2>
+        <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:20px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <span style="font-size:13px;font-weight:600">{{ .Disk.Used }} / {{ .Disk.Total }}</span>
+                <span style="font-size:11px;color:var(--text-muted)">{{ .Disk.Free }} free</span>
+            </div>
+            <div class="disk-bar">
+                <div class="fill {{ if gt .Disk.Percent 80 }}" style="width:{{ .Disk.Percent }}%;background:linear-gradient(90deg,#ef4444,#dc2626)"{{ else if gt .Disk.Percent 60 }}" style="width:{{ .Disk.Percent }}%;background:linear-gradient(90deg,#f59e0b,#d97706)"{{ else }}" style="width:{{ .Disk.Percent }}%;background:linear-gradient(90deg,#10b981,#059669)"{{ end }}></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:4px;">
+                <span>{{ .Disk.Percent }}% used</span>
+                <span>{{ .Disk.UsedGB | printf "%.1f" }} GB / {{ .Disk.TotalGB | printf "%.1f" }} GB</span>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+(function() {
+    // Restore auto-refresh preference
+    var ar = document.getElementById('auto-refresh');
+    if (ar) {
+        ar.checked = localStorage.getItem('admin-auto-refresh') === 'true';
+        if (ar.checked) scheduleRefresh();
+    }
+})();
+
+var refreshTimer = null;
+function toggleAutoRefresh() {
+    var cb = document.getElementById('auto-refresh');
+    localStorage.setItem('admin-auto-refresh', cb.checked);
+    if (cb.checked) {
+        scheduleRefresh();
+    } else if (refreshTimer) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+    }
+}
+function scheduleRefresh() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(function() {
+        location.reload();
+    }, 30000);
+}
+
+function channelAction(action, username) {
+    if (action === 'stop' && !confirm('Delete channel "' + username + '"?')) return;
+    var url = '/' + action + '_channel/' + encodeURIComponent(username);
+    fetch(url, {method: 'POST'}).then(function() {
+        location.reload();
+    }).catch(function() {
+        location.reload();
+    });
+}
+
+function toggleSection(id, btn) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    var hidden = el.style.display === 'none';
+    el.style.display = hidden ? '' : 'none';
+    btn.textContent = hidden ? '▲' : '▼';
+}
+
+function filterOrphans() {
+    var q = document.getElementById('orphan-search').value.toLowerCase();
+    var rows = document.querySelectorAll('#orphans-tbody tr');
+    rows.forEach(function(tr) {
+        var text = (tr.textContent || '').toLowerCase();
+        tr.style.display = text.indexOf(q) !== -1 ? '' : 'none';
+    });
+}
+
+function retryOrphan(path, btn) {
+    btn.disabled = true;
+    btn.textContent = '...';
+    fetch('/api/orphans/retry', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({paths: [path]})
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.length > 0 && data[0].status === 'queued') {
+            btn.textContent = 'Queued';
+            btn.style.opacity = '0.5';
+            setTimeout(function() { location.reload(); }, 3000);
+        } else {
+            btn.textContent = 'Failed';
+            btn.style.background = 'rgba(239,68,68,0.15)';
+            btn.style.color = '#ef4444';
+        }
+    }).catch(function() {
+        btn.textContent = 'Error';
+        btn.style.background = 'rgba(239,68,68,0.15)';
+        btn.style.color = '#ef4444';
+    });
+}
+
+function deleteOrphan(path, btn) {
+    if (!confirm('Delete ' + path + '?')) return;
+    btn.disabled = true;
+    btn.textContent = '...';
+    fetch('/api/orphans', {
+        method: 'DELETE',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({paths: [path]})
+    }).then(function(r) { return r.json(); }).then(function() {
+        var tr = btn.closest('tr');
+        if (tr) tr.remove();
+    }).catch(function() {
+        btn.textContent = 'Error';
+    });
+}
+</script>
+</body>
+</html>

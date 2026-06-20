@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // CatboxUploader handles uploading images to Catbox.moe.
@@ -19,10 +23,51 @@ type CatboxUploader struct {
 }
 
 // NewCatboxUploader creates a new Catbox.moe uploader.
+// If ALL_PROXY is set to a SOCKS5 URL, the client routes through that proxy.
+// Otherwise it connects directly (no env proxy).
 func NewCatboxUploader() *CatboxUploader {
-	return &CatboxUploader{
-		client: newNoProxyClient(2 * time.Minute),
+	transport := &http.Transport{
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
+
+	if addr := socks5ProxyFromEnv(); addr != "" {
+		dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
+		if err == nil {
+			transport.DialContext = dialer.(proxy.ContextDialer).DialContext
+		}
+	}
+
+	return &CatboxUploader{
+		client: &http.Client{
+			Timeout:   2 * time.Minute,
+			Transport: transport,
+		},
+	}
+}
+
+// socks5ProxyFromEnv returns the SOCKS5 proxy address from ALL_PROXY / all_proxy
+// env vars, or empty string if none is set. Ignores non-SOCKS5 URLs.
+func socks5ProxyFromEnv() string {
+	for _, key := range []string{"ALL_PROXY", "all_proxy"} {
+		if v := os.Getenv(key); v != "" {
+			u, err := url.Parse(v)
+			if err != nil {
+				continue
+			}
+			if u.Scheme == "socks5" || u.Scheme == "socks5h" {
+				host := u.Host
+				if u.Port() == "" {
+					host = net.JoinHostPort(u.Host, "1080")
+				}
+				return host
+			}
+		}
+	}
+	return ""
 }
 
 // Upload uploads a file to Catbox.moe and returns the direct file URL.
@@ -101,7 +146,11 @@ func (u *CatboxUploader) uploadOnce(filePath string) (string, error) {
 	}
 	req.ContentLength = totalLen
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("User-Agent", defaultUserAgent)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Origin", "https://catbox.moe")
+	req.Header.Set("Referer", "https://catbox.moe/")
 
 	resp, err := u.client.Do(req)
 	if err != nil {

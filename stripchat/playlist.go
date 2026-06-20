@@ -411,10 +411,12 @@ func pickPollInterval(current, candidate time.Duration) time.Duration {
 
 // decryptMouflonPlaylist decrypts all MOUFLON-encrypted URIs in a playlist body.
 // Handles two formats:
-//   Format A: URL line directly contains an encrypted token between numbers:
-//     https://.../segment_NUM_TOKEN_NUM_partN.mp4
-//   Format B: #EXT-X-MOUFLON:URI: line with encrypted token, followed by
-//     a URL line containing "media.mp4" which is replaced with the decrypted URI.
+//
+//	Format A: URL line directly contains an encrypted token between numbers:
+//	  https://.../segment_NUM_TOKEN_NUM_partN.mp4
+//	Format B: #EXT-X-MOUFLON:URI: line with encrypted token, followed by
+//	  a URL line containing "media.mp4" which is replaced with the decrypted URI.
+//
 // The MOUFLON tag lines are stripped from the output since the m3u8 parser
 // does not recognize them and may crash on unknown tags.
 func decryptMouflonPlaylist(body, pdkey string) string {

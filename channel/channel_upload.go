@@ -239,12 +239,9 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 		// the metadata is persisted.  If the DB save failed, the journal
 		// was cleared above so the upload retries and generates fresh links.
 		if server.Config != nil && server.Config.DeleteLocalAfterUpload && len(success) > 0 && dbSaved {
-			if removeErr := removeFileWithRetry(filePath, 10); removeErr != nil {
-				ch.Warn("upload: could not remove %s after 10 attempts: %v — keeping for retry", filename, removeErr)
-			}
-			// Also clean up any associated preview sidecar files
-			for _, suffix := range []string{".thumb.webp", ".thumb.jpg", ".sprite.webp", ".sprite.jpg", ".preview.webp", ".preview.mp4", ".thumb", ".sprite"} {
-				_ = os.Remove(filePath + suffix)
+			DeleteSidecarFiles(filePath)
+			if removeErr := removeFileWithRetry(filePath); removeErr != nil {
+				ch.Warn("upload: could not remove %s — keeping for retry: %v", filename, removeErr)
 			}
 			// Clean up journal entries since local file is gone
 			if fileHash != "" {

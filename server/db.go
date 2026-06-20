@@ -163,7 +163,7 @@ func saveJSONSetting(key string, data []byte) error {
 	patchRespBody, _ := io.ReadAll(patchResp.Body)
 	if patchResp.StatusCode >= 400 {
 		return fmt.Errorf("patch returned %d: %s", patchResp.StatusCode, string(patchRespBody))
-	}	// Supabase returns "[]" when PATCH matched zero rows.
+	} // Supabase returns "[]" when PATCH matched zero rows.
 	if strings.TrimSpace(string(patchRespBody)) == "[]" {
 		// Row doesn't exist yet — INSERT it.
 		// Include resolution=merge-duplicates so a concurrent writer that

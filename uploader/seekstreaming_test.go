@@ -55,6 +55,11 @@ func TestSeekStreaming413IsFatal(t *testing.T) {
 			w.Header().Set("Location", "https://seekstreaming.com/tus/upload123")
 			w.WriteHeader(http.StatusCreated)
 
+		case r.Method == "HEAD" && strings.HasPrefix(r.URL.Path, "/tus/"):
+			w.Header().Set("Upload-Offset", "0")
+			w.Header().Set("Tus-Resumable", "1.0.0")
+			w.WriteHeader(http.StatusOK)
+
 		case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/tus/"):
 			atomic.AddInt32(&patchCount, 1)
 			// Simulate a Cloudflare-wrapped 413 just like the real error.
@@ -208,9 +213,9 @@ func TestSeekStreaming413FromCreateIsFatal(t *testing.T) {
 // the error-detection function without any HTTP calls or retries.
 func TestIsUploadPayloadTooLarge(t *testing.T) {
 	tests := []struct {
-		name  string
-		err   error
-		want  bool
+		name string
+		err  error
+		want bool
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "other error", err: fmt.Errorf("something else"), want: false},
@@ -264,6 +269,11 @@ func TestSeekStreaming502IsRetryable(t *testing.T) {
 			atomic.AddInt32(&postCount, 1)
 			w.Header().Set("Location", "https://seekstreaming.com/tus/upload789")
 			w.WriteHeader(http.StatusCreated)
+
+		case r.Method == "HEAD" && strings.HasPrefix(r.URL.Path, "/tus/"):
+			w.Header().Set("Upload-Offset", "0")
+			w.Header().Set("Tus-Resumable", "1.0.0")
+			w.WriteHeader(http.StatusOK)
 
 		case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/tus/"):
 			n := atomic.AddInt32(&patchCount, 1)

@@ -15,16 +15,16 @@ import (
 )
 
 const (
-	thumbWidth        = 1280
-	thumbHeight       = 720
-	spriteFrames      = 16
-	spriteCols        = 4
-	spriteRows        = 4
-	spriteFrameW      = 640
-	spriteFrameH      = 360
-	previewWidth      = 320
-	previewDuration   = 6.0   // seconds
-	previewSegments   = 12    // number of smooth clips to stitch (each ~0.5s)
+	thumbWidth      = 1280
+	thumbHeight     = 720
+	spriteFrames    = 16
+	spriteCols      = 4
+	spriteRows      = 4
+	spriteFrameW    = 640
+	spriteFrameH    = 360
+	previewWidth    = 320
+	previewDuration = 6.0 // seconds
+	previewSegments = 12  // number of smooth clips to stitch (each ~0.5s)
 )
 
 // generateThumbnail is the channel-scoped wrapper — logs go to the channel log.
@@ -139,7 +139,10 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("PANIC [thumb] generating thumbnail for %s: %v", baseName, r)
-				select { case thumbDone <- "": default: }
+				select {
+				case thumbDone <- "":
+				default:
+				}
 			}
 		}()
 		thumbCtx, thumbCancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -198,7 +201,10 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("PANIC [sprite] generating sprite for %s: %v", baseName, r)
-				select { case spriteDone <- "": default: }
+				select {
+				case spriteDone <- "":
+				default:
+				}
 			}
 		}()
 		spriteCtx, spriteCancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -269,7 +275,10 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("PANIC [preview] generating preview for %s: %v", baseName, r)
-				select { case previewDone <- "": default: }
+				select {
+				case previewDone <- "":
+				default:
+				}
 			}
 		}()
 		previewCtx, previewCancel := context.WithTimeout(context.Background(), 15*time.Minute)

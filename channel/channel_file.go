@@ -23,7 +23,15 @@ import (
 	"github.com/teacat/chaturbate-dvr/uploader"
 )
 
-var pendingDirMu sync.Mutex
+var pendingDirMu sync.Map // map[string]*sync.Mutex, keyed by channel username
+
+// pendingMu returns the per-channel mutex for the given username.
+// Each channel has its own lock so one channel's ffmpeg encode does not
+// block another channel's pending directory operations.
+func pendingMu(username string) *sync.Mutex {
+	v, _ := pendingDirMu.LoadOrStore(username, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
 
 type Pattern struct {
 	Username string
@@ -270,6 +278,10 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string, skipMinDur
 	} else if !skipMinDuration && ch.handleMinDurationAndMerge(finalOutput) {
 		return // video was deferred to pending or merged+uploaded
 	} else {
+		// The muxed output was created with -copyts, which preserves the
+		// original fMP4 absolute timestamps (e.g. PTS=5044s).  Normalize
+		// so the file plays correctly from the start.
+		normalizeFMP4Timestamps(finalOutput)
 		ch.MoveToOutputDir(finalOutput)
 	}
 }
@@ -454,16 +466,31 @@ func moveFile(src, dest string) error {
 	// still open, so defer in.Close() would keep the file busy.
 	in.Close()
 
-	// Retry remove with backoff.  If it still fails, the copy succeeded —
-	// the file was effectively moved.  The leftover source will be cleaned
-	// up on the next orphan run.
-	for i := 0; i < 5; i++ {
+	// Retry remove with aggressive backoff (up to ~50s total) so transient
+	// Windows locks (AV scanner, Search Indexer) have time to release.
+	// If still locked, try rename + delete as a fallback.
+	for i := 0; i < 20; i++ {
 		if err := os.Remove(src); err == nil {
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		if i >= 10 {
+			tmpPath := fmt.Sprintf("%s.deleting.%d", src, i)
+			if renameErr := os.Rename(src, tmpPath); renameErr == nil {
+				if removeErr := os.Remove(tmpPath); removeErr == nil {
+					return nil
+				}
+				os.Rename(tmpPath, src)
+			}
+		}
+		backoff := time.Duration(100*(1<<uint(min(i, 8)))) * time.Millisecond // 100ms, 200ms, 400ms, … 25.6s
+		if backoff > 5*time.Second {
+			backoff = 5 * time.Second
+		}
+		time.Sleep(backoff)
 	}
-	return nil
+	// Source could not be removed — return the error so the caller can handle
+	// the duplicate without silently leaving orphaned files.
+	return fmt.Errorf("could not remove source after copy: %w", os.Remove(src))
 }
 
 // GenerateFilename creates a filename based on the configured pattern and the current timestamp
@@ -624,8 +651,9 @@ func MaybeDeferToPending(filePath string) bool {
 // Acquires pendingDirMu so it cannot race with handleMinDurationAndMerge or
 // processAllPendingSegments, which may call deletePendingSegments concurrently.
 func moveToPendingDir(filePath, username string) error {
-	pendingDirMu.Lock()
-	defer pendingDirMu.Unlock()
+	mu := pendingMu(username)
+	mu.Lock()
+	defer mu.Unlock()
 
 	pendingDir := pendingSegmentsDir(username)
 	if err := os.MkdirAll(pendingDir, 0777); err != nil {
@@ -836,16 +864,35 @@ func DeleteSidecarFiles(videoPath string) {
 	}
 }
 
-// removeFileWithRetry attempts to remove a file, retrying up to maxAttempts
-// times with exponential backoff.  This handles transient Windows file locks
-// from AV scanners, Search Indexer, etc.  Returns nil if the file was removed
-// (or didn't exist).
-func removeFileWithRetry(path string, maxAttempts int) error {
-	for i := 0; i < maxAttempts; i++ {
+// removeFileWithRetry attempts to remove a file, retrying up to 5 times
+// with exponential backoff.  This handles transient Windows file locks
+// from AV scanners, Search Indexer, upload handles still closing, etc.
+//
+// After 2 attempts, it tries a rename-then-delete strategy: renaming
+// the file can succeed even when deletion is blocked by a reader (common with
+// Windows Defender), which often releases the lock on the original path.
+// Returns nil if the file was removed (or didn't exist).
+func removeFileWithRetry(path string) error {
+	for i := 0; i < 5; i++ {
 		if err := os.Remove(path); err == nil || os.IsNotExist(err) {
 			return nil
 		}
-		time.Sleep(time.Duration(200*(1<<min(i, 4))) * time.Millisecond) // 200ms, 400ms, 800ms, 1.6s, …
+
+		if i >= 2 {
+			tmpPath := fmt.Sprintf("%s.deleting.%d", path, i)
+			if renameErr := os.Rename(path, tmpPath); renameErr == nil {
+				if removeErr := os.Remove(tmpPath); removeErr == nil {
+					return nil
+				}
+				os.Rename(tmpPath, path)
+			}
+		}
+
+		backoff := time.Duration(500*(1<<uint(min(i, 6)))) * time.Millisecond // 0.5s, 1s, 2s, 4s, 8s, 16s, 32s
+		if backoff > 15*time.Second {
+			backoff = 15 * time.Second
+		}
+		time.Sleep(backoff)
 	}
 	return os.Remove(path) // final attempt, return the error
 }
@@ -877,10 +924,17 @@ func normalizeFMP4Timestamps(videoPath string) (string, error) {
 
 	config.AcquireFFmpeg()
 	defer config.ReleaseFFmpeg()
+
+	// Use -fflags +genpts to regenerate PTS from DTS, and -fflags +igndts
+	// so any lingering broken decode timestamps from LL-HLS fragments do not
+	// cascade into the output PTS.  Combined with -c copy this is a fast remux
+	// that gives every player clean, zero-based timestamps.
 	err := config.FFmpegCommandContext(ctx,
 		"-y",
+		"-fflags", "+genpts+igndts",
 		"-i", videoPath,
 		"-c", "copy",
+		"-fflags", "+genpts",
 		"-movflags", "+faststart",
 		tmpPath,
 	).Run()
@@ -1215,11 +1269,11 @@ func UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL string) bool {
 	// Delete local file only once ALL hosts have the file safely and metadata
 	// is persisted. Otherwise the file remains available for retry.
 	if cfg.DeleteLocalAfterUpload && len(success) > 0 && dbSaved {
-		if err := removeFileWithRetry(filePath, 10); err != nil {
-			recoveryLogf(filename, "could not remove local file after 10 attempts: %v — will retry on next restart", err)
+		DeleteSidecarFiles(filePath)
+		if err := removeFileWithRetry(filePath); err != nil {
+			recoveryLogf(filename, "could not remove local file: %v — will retry on next restart", err)
 			return true
 		}
-		DeleteSidecarFiles(filePath)
 		if fileHash != "" {
 			if jErr := server.DeleteJournalByHash(fileHash); jErr != nil {
 				recoveryLogf(filename, "could not delete journal: %v", jErr)
@@ -1343,17 +1397,38 @@ func VideoDurationSeconds(videoPath string) (float64, error) {
 	return 0, fmt.Errorf("probe %s: could not parse duration from ffprobe or ffmpeg", filepath.Base(videoPath))
 }
 
-// mergeVideos concatenates multiple video files into a single output using the
-// ffmpeg concat demuxer, then normalizes timestamps.  All source files must
-// share the same codec parameters (same encoding, resolution, etc.) for a
-// plain stream-copy to work.
+// mergeVideos concatenates multiple video files into a single output.
 //
-// The post-merge normalization is critical: pending segments are raw fMP4 with
-// absolute server timestamps (e.g. PTS=5044s) from LL-HLS streams.  The concat
-// demuxer copies packets verbatim, so the merged output inherits those broken
-// timestamps -> laggy playback, wrong duration, corrupt seeking.
-// A fast stream-copy remux with -fflags +genpts regenerates PTS from DTS.
+// Strategy (two-phase):
+//  1. Fast path — concat demuxer with stream copy.  Works when all segments
+//     share the same codec parameters and each (except the first) starts with
+//     a keyframe.  If it succeeds AND the output contains all expected streams
+//     with reasonable duration, we are done.
+//  2. Fallback — concat demuxer with re-encode (libx264 + AAC).  Fixes
+//     codec-parameter mismatch, missing-keyframe, and broken-timestamp issues
+//     that the stream-copy path cannot handle.
+//
+// In both phases the output is always normalized: pending segments carry
+// absolute server timestamps (PTS=5044s from LL-HLS) that would otherwise
+// make the merged file unseekable and break playback after the first segment
+// boundary.
 func mergeVideos(inputs []string, outputPath string) error {
+	if len(inputs) < 2 {
+		return fmt.Errorf("need at least 2 inputs, got %d", len(inputs))
+	}
+
+	// ── Pre-flight: validate every segment ──────────────────────────────
+	for _, p := range inputs {
+		dur, err := VideoDurationSeconds(p)
+		if err != nil || dur <= 0 {
+			if err == nil {
+				err = fmt.Errorf("zero duration")
+			}
+			return fmt.Errorf("segment %s is invalid: %w", filepath.Base(p), err)
+		}
+	}
+
+	// ── Build concat list for both phases ────────────────────────────────
 	listFile, err := os.CreateTemp("", "concat-*.txt")
 	if err != nil {
 		return fmt.Errorf("create concat list: %w", err)
@@ -1366,54 +1441,92 @@ func mergeVideos(inputs []string, outputPath string) error {
 		if aErr != nil {
 			abs = p
 		}
-		// Escape single quotes for ffmpeg's concat demuxer.
 		escaped := strings.ReplaceAll(abs, "'", "'\\''")
 		if _, wErr := fmt.Fprintf(listFile, "file '%s'\n", escaped); wErr != nil {
 			return fmt.Errorf("write concat list: %w", wErr)
 		}
 	}
 
+	// Compute total input duration for validation later.
+	var totalInputDur float64
+	for _, p := range inputs {
+		if d, e := VideoDurationSeconds(p); e == nil {
+			totalInputDur += d
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-
 	config.AcquireFFmpegHeavy()
 	defer config.ReleaseFFmpegHeavy()
 
-	// Step 1: Concat merge (stream copy).
-	if err := config.FFmpegCommandContext(ctx,
+	// ── Phase 1: Fast stream-copy concat ────────────────────────────────
+	streamCopyOK := config.FFmpegCommandContext(ctx,
 		"-y",
 		"-f", "concat",
 		"-safe", "0",
 		"-i", listFile.Name(),
 		"-c", "copy",
-		"-fflags", "+genpts",
+		"-fflags", "+genpts+igndts",
 		"-movflags", "+faststart",
 		outputPath,
-	).Run(); err != nil {
-		os.Remove(outputPath)
-		return fmt.Errorf("merge video: %w", err)
+	).Run()
+
+	if streamCopyOK == nil {
+		// Probe the output — check it has reasonable duration and at least a video track.
+		outputDur, probeErr := VideoDurationSeconds(outputPath)
+		if probeErr == nil && outputDur > 0 && (totalInputDur <= 0 || outputDur >= totalInputDur*0.5) {
+			tmpPath := outputPath + ".normalized.mp4"
+			if err := config.FFmpegCommandContext(ctx,
+				"-y",
+				"-fflags", "+genpts+igndts",
+				"-i", outputPath,
+				"-c", "copy",
+				"-fflags", "+genpts",
+				"-movflags", "+faststart",
+				tmpPath,
+			).Run(); err != nil {
+				os.Remove(tmpPath)
+				return nil // best-effort — return the concat output as-is
+			}
+			os.Remove(outputPath)
+			if rErr := os.Rename(tmpPath, outputPath); rErr != nil {
+				os.Remove(tmpPath)
+			}
+			return nil
+		}
 	}
 
-	// Step 2: Normalize timestamps.  The concat step preserves the input
-	// segments' original fMP4 absolute timestamps (e.g. PTS=5044s from
-	// LL-HLS).  A stream-copy remux with -fflags +genpts regenerates clean
-	// PTS values starting from 0, so the output plays correctly everywhere.
-	tmpPath := outputPath + ".normalized.mp4"
-	if err := config.FFmpegCommandContext(ctx,
+	// Stream-copy failed or produced a bad output — clean up and re-try.
+	os.Remove(outputPath)
+
+	// ── Phase 2: Re-encode concat ───────────────────────────────────────
+	reEncodeArgs := []string{
 		"-y",
-		"-i", outputPath,
-		"-c", "copy",
-		"-fflags", "+genpts",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", listFile.Name(),
+		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-crf", "23",
+		"-c:a", "aac",
+		"-b:a", "128k",
+	}
+
+	// Force timestamps to start at zero on every segment boundary.
+	// The setpts/asetpts filters reset the timeline so there are no gaps.
+	reEncodeArgs = append(reEncodeArgs,
+		"-vf", "setpts=PTS-STARTPTS",
+		"-af", "asetpts=PTS-STARTPTS",
 		"-movflags", "+faststart",
-		tmpPath,
-	).Run(); err != nil {
-		os.Remove(tmpPath)
-		// If normalization fails, return the concat output as-is (best-effort).
-		return nil
+		outputPath,
+	)
+
+	if err := config.FFmpegCommandContext(ctx, reEncodeArgs...).Run(); err != nil {
+		os.Remove(outputPath)
+		return fmt.Errorf("merge re-encode: %w", err)
 	}
-	if err := os.Rename(tmpPath, outputPath); err != nil {
-		os.Remove(tmpPath)
-	}
+
 	return nil
 }
 
@@ -1431,14 +1544,15 @@ func mergeVideos(inputs []string, outputPath string) error {
 // so the caller should stop processing it.  Returns false when the caller
 // should proceed with its normal upload logic.
 func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
-	pendingDirMu.Lock()
+	mu := pendingMu(ch.Config.Username)
+	mu.Lock()
 
 	minDur := ch.Config.MinDurationBeforeUpload
 	if minDur <= 0 {
 		if server.Config != nil && server.Config.MinDurationBeforeUpload > 0 {
 			minDur = server.Config.MinDurationBeforeUpload
 		} else {
-			pendingDirMu.Unlock()
+			mu.Unlock()
 			return false // feature disabled — proceed normally
 		}
 	}
@@ -1451,11 +1565,11 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
 		if mErr := os.MkdirAll(pendingDir, 0777); mErr == nil {
 			destPath := filepath.Join(pendingDir, filepath.Base(videoPath))
 			if rErr := os.Rename(videoPath, destPath); rErr == nil {
-				pendingDirMu.Unlock()
+				mu.Unlock()
 				return true
 			}
 		}
-		pendingDirMu.Unlock()
+		mu.Unlock()
 		return false
 	}
 
@@ -1464,53 +1578,45 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
 		// pending segments to merge with.
 		segments := collectPendingSegments(ch.Config.Username)
 		if len(segments) == 0 {
-			pendingDirMu.Unlock()
+			mu.Unlock()
 			return false // no pending — proceed normally
 		}
 
 		// Merge pending segments with the current video.
 		// Release the lock during the potentially long ffmpeg encode.
 		mergedPath := videoPath + ".merged.mp4"
-		// Snapshot the segment paths we intend to merge before releasing the lock,
-		// so deletePendingSegments below only removes these exact files.
 		mergeInputs := make([]string, len(segments))
 		copy(mergeInputs, segments)
 		allInputs := append(mergeInputs, videoPath)
 		ch.Info("min-duration: merging %d pending segment(s) with %s", len(mergeInputs), filepath.Base(videoPath))
-		pendingDirMu.Unlock()
+		mu.Unlock()
 		mErr := mergeVideos(allInputs, mergedPath)
 		if mErr != nil {
 			os.Remove(mergedPath) // clean up partial output
 			ch.Error("min-duration: merge failed: %v — uploading current video separately, clearing pending segments", mErr)
-			// Remove the stale pending segments so they don't accumulate.
 			for _, s := range mergeInputs {
 				os.Remove(s)
 			}
 			return false
 		}
 
-		// Verify the merged output duration — fMP4 timestamp issues can
-		// cause the concat merge to produce a valid file that is shorter
-		// than the sum of its parts.
 		mergedDur, probeErr := VideoDurationSeconds(mergedPath)
 		if probeErr != nil || mergedDur < float64(minDur)*0.9 {
 			ch.Warn("min-duration: merged output for %s is %.1fs (expected >= %ds) — uploading current video separately",
 				filepath.Base(mergedPath), mergedDur, minDur)
 			os.Remove(mergedPath)
-			// Remove the stale pending segments.
 			for _, s := range mergeInputs {
 				os.Remove(s)
 			}
 			return false
 		}
 
-		// Re-acquire lock to remove only the segments we merged.
-		pendingDirMu.Lock()
+		mu.Lock()
 		for _, s := range mergeInputs {
 			os.Remove(s)
 		}
 		_ = os.Remove(videoPath)
-		pendingDirMu.Unlock()
+		mu.Unlock()
 
 		if ch.Config.Compress {
 			ch.Info("min-duration: merged -> %s (%.1fs), compressing before upload", filepath.Base(mergedPath), mergedDur)
@@ -1525,14 +1631,14 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
 	// Video is too short — move to pending
 	pendingDir := pendingSegmentsDir(ch.Config.Username)
 	if err := os.MkdirAll(pendingDir, 0777); err != nil {
-		pendingDirMu.Unlock()
+		mu.Unlock()
 		ch.Error("min-duration: cannot create pending dir %s: %v — uploading short video", pendingDir, err)
 		return false
 	}
 
 	destPath := filepath.Join(pendingDir, filepath.Base(videoPath))
 	if err := os.Rename(videoPath, destPath); err != nil {
-		pendingDirMu.Unlock()
+		mu.Unlock()
 		ch.Error("min-duration: cannot move %s to pending: %v — uploading short video", filepath.Base(videoPath), err)
 		return false
 	}
@@ -1543,40 +1649,35 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
 	segments := collectPendingSegments(ch.Config.Username)
 	if len(segments) > 1 {
 		mergedPath := filepath.Join(pendingDir, "merged-"+filepath.Base(destPath))
-		// Snapshot segment paths before releasing lock.
 		mergeInputs := make([]string, len(segments))
 		copy(mergeInputs, segments)
 		ch.Info("min-duration: merging %d pending segment(s)", len(mergeInputs))
-		// Release lock during the ffmpeg encode so other channels aren't blocked.
-		pendingDirMu.Unlock()
+		mu.Unlock()
 		mErr := mergeVideos(mergeInputs, mergedPath)
 		if mErr != nil {
 			os.Remove(mergedPath) // clean up partial output
 			ch.Error("min-duration: merge failed: %v — segments remain pending for next recording", mErr)
 			return true
 		}
-		pendingDirMu.Lock()
+		mu.Lock()
 
-		// Check if the merged video is long enough
 		mergedDur, mErr := VideoDurationSeconds(mergedPath)
 		if mErr != nil {
 			ch.Warn("min-duration: could not probe merged result, uploading anyway: %v", mErr)
-			// Remove only the exact files we merged (not any files added during merge).
 			for _, s := range mergeInputs {
 				os.Remove(s)
 			}
-			pendingDirMu.Unlock()
+			mu.Unlock()
 			ch.MoveToOutputDir(mergedPath)
 			return true
 		}
 
 		if mergedDur >= float64(minDur) {
-			// Remove only the exact files we merged.
 			for _, s := range mergeInputs {
 				os.Remove(s)
 			}
 			ch.Info("min-duration: merged %d segments = %.1fs (>= %ds) — uploading", len(mergeInputs), mergedDur, minDur)
-			pendingDirMu.Unlock()
+			mu.Unlock()
 
 			if ch.Config.Compress {
 				ch.CompressFile(mergedPath)
@@ -1584,30 +1685,28 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
 				ch.MoveToOutputDir(mergedPath)
 			}
 		} else {
-			// Still too short — move merged result back to pending as a single file
 			ch.Info("min-duration: merged %d segments = %.1fs (< %ds) — still pending", len(mergeInputs), mergedDur, minDur)
-			// Remove only the exact files we merged.
 			for _, s := range mergeInputs {
 				os.Remove(s)
 			}
 			mergedDest := filepath.Join(pendingDir, "merged-"+filepath.Base(destPath))
 			if mErr := os.MkdirAll(pendingDir, 0777); mErr == nil {
 				if rErr := os.Rename(mergedPath, mergedDest); rErr != nil {
-					pendingDirMu.Unlock()
+					mu.Unlock()
 					ch.Error("min-duration: cannot keep merged result pending: %v — uploading anyway", rErr)
 					ch.MoveToOutputDir(mergedPath)
 					return true
 				}
 			} else {
-				pendingDirMu.Unlock()
+				mu.Unlock()
 				ch.Error("min-duration: cannot recreate pending dir: %v — uploading anyway", mErr)
 				ch.MoveToOutputDir(mergedPath)
 				return true
 			}
-			pendingDirMu.Unlock()
+			mu.Unlock()
 		}
 	} else {
-		pendingDirMu.Unlock()
+		mu.Unlock()
 	}
 
 	return true // video was deferred to pending (or merged+uploaded)
@@ -1638,12 +1737,12 @@ func processAllPendingSegments() {
 				continue
 			}
 			username := ud.Name()
+			mu := pendingMu(username)
 
-			// Lock per-user to avoid holding the global lock during ffmpeg calls.
-			pendingDirMu.Lock()
+			mu.Lock()
 			segments := collectPendingSegmentsInDir(filepath.Join(pendingRoot, username))
 			if len(segments) < 1 {
-				pendingDirMu.Unlock()
+				mu.Unlock()
 				continue
 			}
 
@@ -1651,28 +1750,26 @@ func processAllPendingSegments() {
 			if minDur <= 0 {
 				for _, s := range segments {
 					recoveryLogf(s, "recovery: uploading pending segment %s", filepath.Base(s))
-					// Release lock during potentially long operations.
-					pendingDirMu.Unlock()
+					mu.Unlock()
 					thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(s)
 					UploadOrphanedFile(s, thumbURL, spriteURL, previewURL)
 					_ = os.Remove(s)
-					pendingDirMu.Lock()
+					mu.Lock()
 				}
 				_ = os.Remove(pendingSegmentsDir(username))
-				pendingDirMu.Unlock()
+				mu.Unlock()
 				continue
 			}
 
 			// Min-duration is enabled — merge segments and only upload if threshold met.
-			// Snapshot segments and release lock before ffmpeg.
 			segCopy := make([]string, len(segments))
 			copy(segCopy, segments)
-			pendingDirMu.Unlock()
+			mu.Unlock()
 
 			mergedPath := filepath.Join(pendingSegmentsDir(username), "merged-"+filepath.Base(segments[0]))
 			recoveryLogf(segments[0], "recovery: merging %d pending segments for %s", len(segments), username)
 			if err := mergeVideos(segCopy, mergedPath); err != nil {
-				os.Remove(mergedPath) // clean up partial output
+				os.Remove(mergedPath)
 				recoveryLogf(segments[0], "recovery: merge failed for %s: %v — leaving segments pending", username, err)
 				continue
 			}
@@ -1680,28 +1777,22 @@ func processAllPendingSegments() {
 			mergedDur, durErr := VideoDurationSeconds(mergedPath)
 			pendingDir := pendingSegmentsDir(username)
 			if durErr != nil || mergedDur < float64(minDur) {
-				// Merged result still below threshold — keep it pending for next recording
 				mergedName := "merged-" + filepath.Base(segments[0])
 				if durErr != nil {
 					recoveryLogf(mergedPath, "recovery: could not probe merged duration (%v) — keeping pending", durErr)
 				} else {
 					recoveryLogf(mergedPath, "recovery: merged = %.1fs (< %ds) — keeping pending", mergedDur, minDur)
 				}
-				pendingDirMu.Lock()
-				// Remove only the exact files we merged (not any files added during merge).
+				mu.Lock()
 				for _, s := range segCopy {
 					os.Remove(s)
 				}
 				_ = os.MkdirAll(pendingDir, 0777)
 				_ = os.Rename(mergedPath, filepath.Join(pendingDir, mergedName))
-				pendingDirMu.Unlock()
+				mu.Unlock()
 				continue
 			}
 
-			// Sanity check: the merged output should not be significantly shorter
-			// than the sum of input durations.  If it is, the concat demuxer may
-			// have silently dropped incompatible streams (encoding mismatch across
-			// different recording sessions), producing a shorter-than-expected file.
 			var totalInputDur float64
 			for _, s := range segCopy {
 				if d, e := VideoDurationSeconds(s); e == nil {
@@ -1711,22 +1802,21 @@ func processAllPendingSegments() {
 			if totalInputDur > 0 && mergedDur < totalInputDur*0.5 {
 				recoveryLogf(mergedPath, "recovery: merged output %.1fs is <50%% of total input %.1fs — streams may be incompatible, keeping pending",
 					mergedDur, totalInputDur)
-				pendingDirMu.Lock()
+				mu.Lock()
 				for _, s := range segCopy {
 					os.Remove(s)
 				}
 				_ = os.MkdirAll(pendingDir, 0777)
 				_ = os.Rename(mergedPath, filepath.Join(pendingDir, "merged-"+filepath.Base(segments[0])))
-				pendingDirMu.Unlock()
+				mu.Unlock()
 				continue
 			}
 
-			pendingDirMu.Lock()
-			// Remove only the exact files we merged.
+			mu.Lock()
 			for _, s := range segCopy {
 				os.Remove(s)
 			}
-			pendingDirMu.Unlock()
+			mu.Unlock()
 			recoveryLogf(mergedPath, "recovery: merged = %.1fs (>= %ds) — uploading", mergedDur, minDur)
 			thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(mergedPath)
 			UploadOrphanedFile(mergedPath, thumbURL, spriteURL, previewURL)

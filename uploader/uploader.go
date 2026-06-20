@@ -104,15 +104,15 @@ type UploadResult struct {
 
 // MultiHostUploader handles uploading to multiple hosts simultaneously
 type MultiHostUploader struct {
-	gofile     *GoFileUploader
-	voesx      *VoeSXUploader
-	streamtape *StreamtapeUploader
-	mixdrop    *MixdropUploader
+	gofile        *GoFileUploader
+	voesx         *VoeSXUploader
+	streamtape    *StreamtapeUploader
+	mixdrop       *MixdropUploader
 	seekstreaming *SeekStreamingUploader
-	log        Logger
-	hostInitOnce sync.Once
-	hosts      map[string]uploaderFunc // host name -> upload function, lazy-init
-	progress   ProgressFunc
+	log           Logger
+	hostInitOnce  sync.Once
+	hosts         map[string]uploaderFunc // host name -> upload function, lazy-init
+	progress      ProgressFunc
 }
 
 type uploaderFunc func(string, ProgressFunc) (string, error)
@@ -147,12 +147,12 @@ func NewMultiHostUploader(voeSXAPIKey, streamtapeLogin, streamtapeKey, mixdropEm
 		log = &nilLogger{}
 	}
 	return &MultiHostUploader{
-		gofile:     NewGoFileUploader(),
-		voesx:      NewVoeSXUploader(voeSXAPIKey),
-		streamtape: NewStreamtapeUploader(streamtapeLogin, streamtapeKey),
-		mixdrop:    NewMixdropUploader(mixdropEmail, mixdropToken),
+		gofile:        NewGoFileUploader(),
+		voesx:         NewVoeSXUploader(voeSXAPIKey),
+		streamtape:    NewStreamtapeUploader(streamtapeLogin, streamtapeKey),
+		mixdrop:       NewMixdropUploader(mixdropEmail, mixdropToken),
 		seekstreaming: NewSeekStreamingUploader(seekStreamingKey),
-		log:        log,
+		log:           log,
 	}
 }
 

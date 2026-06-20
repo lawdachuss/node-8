@@ -1,16 +1,18 @@
-﻿package server
+package server
 
 import (
-        "encoding/json"
-        "fmt"
-        "strings"
-        "sync"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
 
-        "github.com/teacat/chaturbate-dvr/entity"
+	"github.com/teacat/chaturbate-dvr/entity"
 )
 
 var Config *entity.Config
 var ConfigMu sync.RWMutex
+var StartTime = time.Now()
 
 type persistedSettings struct {
 	Cookies         string `json:"cookies"`
@@ -120,13 +122,13 @@ func LoadSettings() error {
 }
 
 func extractCookie(cookieStr, name string) string {
-        for _, pair := range strings.Split(cookieStr, ";") {
-                parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
-                if len(parts) == 2 && strings.TrimSpace(parts[0]) == name {
-                        return strings.TrimSpace(parts[1])
-                }
-        }
-        return ""
+	for _, pair := range strings.Split(cookieStr, ";") {
+		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) == name {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
 }
 
 // UpdateUploaderCredentials updates upload service credentials and protects concurrent access with a mutex.

@@ -45,19 +45,19 @@ type BreakerConfig struct {
 // DefaultBreakerConfig returns sensible defaults for Chaturbate API calls.
 func DefaultBreakerConfig() BreakerConfig {
 	return BreakerConfig{
-		Threshold:   0.2,            // open at 20% error rate
-		MinSamples:  10,             // need 10 samples first
+		Threshold:   0.2,              // open at 20% error rate
+		MinSamples:  10,               // need 10 samples first
 		Cooldown:    10 * time.Second, // stay open for 10s
-		HalfOpenMax: 3,              // try 3 probes in half-open
+		HalfOpenMax: 3,                // try 3 probes in half-open
 	}
 }
 
 // NewCircuitBreaker creates a circuit breaker with the given config.
 func NewCircuitBreaker(cfg BreakerConfig) *CircuitBreaker {
 	return &CircuitBreaker{
-		threshold:  cfg.Threshold,
-		minSamples: cfg.MinSamples,
-		cooldown:   cfg.Cooldown,
+		threshold:   cfg.Threshold,
+		minSamples:  cfg.MinSamples,
+		cooldown:    cfg.Cooldown,
 		halfOpenMax: cfg.HalfOpenMax,
 	}
 }

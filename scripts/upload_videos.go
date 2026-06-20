@@ -100,14 +100,14 @@ func main() {
 
 	// Build server.Config from env
 	server.Config = &entity.Config{
-		SupabaseURL:       os.Getenv("SUPABASE_URL"),
-		SupabaseAPIKey:    os.Getenv("SUPABASE_API_KEY"),
-		VoeSXAPIKey:       os.Getenv("VOESX_API_KEY"),
-		StreamtapeLogin:   os.Getenv("STREAMTAPE_LOGIN"),
-		StreamtapeKey:     os.Getenv("STREAMTAPE_KEY"),
-		MixdropEmail:      os.Getenv("MIXDROP_EMAIL"),
-		MixdropToken:      firstNonEmpty(os.Getenv("MIXDROP_TOKEN"), os.Getenv("MIXDROP_KEY")),
-		SeekStreamingKey:  os.Getenv("SEEKSTREAMING_KEY"),
+		SupabaseURL:      os.Getenv("SUPABASE_URL"),
+		SupabaseAPIKey:   os.Getenv("SUPABASE_API_KEY"),
+		VoeSXAPIKey:      os.Getenv("VOESX_API_KEY"),
+		StreamtapeLogin:  os.Getenv("STREAMTAPE_LOGIN"),
+		StreamtapeKey:    os.Getenv("STREAMTAPE_KEY"),
+		MixdropEmail:     os.Getenv("MIXDROP_EMAIL"),
+		MixdropToken:     firstNonEmpty(os.Getenv("MIXDROP_TOKEN"), os.Getenv("MIXDROP_KEY")),
+		SeekStreamingKey: os.Getenv("SEEKSTREAMING_KEY"),
 	}
 
 	// Log presence (masked) of uploader credentials to help debugging without leaking secrets.
@@ -118,11 +118,11 @@ func main() {
 			}
 			return fmt.Sprintf("<len=%d>", len(s))
 		}
-	log.Printf("uploader creds: MixdropEmail=%t MixdropToken=%s StreamtapeLogin=%t StreamtapeKey=%s SeekStreaming=%s",
-		server.Config.MixdropEmail != "", mask(server.Config.MixdropToken),
-		server.Config.StreamtapeLogin != "", mask(server.Config.StreamtapeKey),
-		mask(server.Config.SeekStreamingKey),
-	)
+		log.Printf("uploader creds: MixdropEmail=%t MixdropToken=%s StreamtapeLogin=%t StreamtapeKey=%s SeekStreaming=%s",
+			server.Config.MixdropEmail != "", mask(server.Config.MixdropToken),
+			server.Config.StreamtapeLogin != "", mask(server.Config.StreamtapeKey),
+			mask(server.Config.SeekStreamingKey),
+		)
 	}
 
 	dbClient := server.GetDBClient()

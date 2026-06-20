@@ -1,44 +1,46 @@
 package router
 
 import (
-        "context"
-        "encoding/json"
-        "fmt"
-        "html/template"
-        "io"
-        "log"
-        "mime"
-        "net/http"
-        "os"
-        "path/filepath"
-        "sort"
-        "strconv"
-        "strings"
-        "sync"
-        "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"io"
+	"log"
+	"mime"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/teacat/chaturbate-dvr/channel"
 	"github.com/teacat/chaturbate-dvr/config"
 	"github.com/teacat/chaturbate-dvr/entity"
-        "github.com/teacat/chaturbate-dvr/internal"
-        "github.com/teacat/chaturbate-dvr/server"
+	"github.com/teacat/chaturbate-dvr/internal"
+	"github.com/teacat/chaturbate-dvr/server"
 )
 
 // IndexData represents the data structure for the index page.
 type IndexData struct {
-	Config       *entity.Config
-	Channels     []*entity.ChannelInfo
-	Disk         *entity.DiskInfo
+	Config              *entity.Config
+	Channels            []*entity.ChannelInfo
+	Disk                *entity.DiskInfo
 	SessionDeadlineUnix int64 // Unix timestamp when current session ends; 0 = inactive
-	SessionDurationSec   int  // Total session duration in seconds
+	SessionDurationSec  int   // Total session duration in seconds
 }
 
 type hostPlayer struct {
-        Host     string `json:"host"`
-        Link     string `json:"link"`
-        EmbedURL string `json:"embedUrl,omitempty"`
-        VideoURL string `json:"videoUrl,omitempty"`
+	Host     string `json:"host"`
+	Link     string `json:"link"`
+	EmbedURL string `json:"embedUrl,omitempty"`
+	VideoURL string `json:"videoUrl,omitempty"`
 }
 
 // Index renders the index page with channel information.
@@ -62,6 +64,165 @@ func Index(c *gin.Context) {
 	})
 }
 
+// ChannelPipelinesEntry holds per-channel pipeline queue counts for the admin page.
+type ChannelPipelinesEntry struct {
+	Username string
+	Queued   int
+	Failed   int
+}
+
+// AdminData represents the data structure for the admin page.
+type AdminData struct {
+	Config   *entity.Config
+	Channels []*entity.ChannelInfo
+	Disk     *entity.DiskInfo
+	Uploads  *entity.UploadsResponse
+	Orphans  []orphanEntry
+
+	// Session
+	SessionActive    bool
+	SessionRemaining string
+	SessionDuration  string
+
+	// System health
+	GoVersion    string
+	GoGoroutines int
+	GoMemoryMB   string
+	GoNumCPU     int
+	Uptime       string
+	FFmpegFound  bool
+
+	// Tunnel
+	TunnelURL string
+
+	// Per-channel pipeline counts (keyed by username for easy template lookup)
+	PipelineMap map[string]ChannelPipelinesEntry
+}
+
+// AdminPage renders the admin panel with deep upload/orphan matrices.
+func AdminPage(c *gin.Context) {
+	c.Header("Cache-Control", "public, max-age=15")
+
+	channels := server.Manager.ChannelInfo()
+	uploads := server.Manager.UploadEntries()
+
+	// ── Orphans ──
+	dirs := []string{"videos"}
+	if server.Config.OutputDir != "" {
+		dirs = append(dirs, server.Config.OutputDir)
+	}
+	uploaded := map[string]bool{}
+	allRecs, _ := server.GetDBClient().GetAllRecordings()
+	for i := range allRecs {
+		uploaded[allRecs[i].Filename] = true
+	}
+	var orphans []orphanEntry
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			ext := strings.ToLower(filepath.Ext(name))
+			if ext != ".mp4" && ext != ".mkv" {
+				continue
+			}
+			if strings.Contains(name, ".video.") || strings.Contains(name, ".audio.") || strings.Contains(name, ".muxed.") {
+				continue
+			}
+			if uploaded[name] {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			orphans = append(orphans, orphanEntry{
+				Path:     filepath.Join(dir, name),
+				Filename: name,
+				Size:     info.Size(),
+				ModTime:  info.ModTime().Format(time.RFC3339),
+				Age:      time.Since(info.ModTime()).Round(time.Hour).String(),
+			})
+		}
+	}
+
+	// ── Session info ──
+	var sessionActive bool
+	var sessionRemaining, sessionDuration string
+	remaining, active := server.Manager.SessionInfo()
+	if active {
+		sessionActive = true
+		sessionRemaining = remaining.Round(time.Second).String()
+		sessionDuration = server.Config.SessionDurationParsed.Round(time.Second).String()
+	}
+
+	// ── System health ──
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	ffmpegFound := false
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		ffmpegFound = true
+	} else if server.Config.FFmpegPath != "" {
+		if _, err := exec.LookPath(server.Config.FFmpegPath); err == nil {
+			ffmpegFound = true
+		} else if _, err := os.Stat(server.Config.FFmpegPath); err == nil {
+			ffmpegFound = true
+		}
+	}
+	uptime := time.Since(server.StartTime).Round(time.Second).String()
+
+	// ── Tunnel ──
+	tunnelURL, _ := server.LoadCurrentTunnel()
+
+	// ── Per-channel pipeline counts ──
+	channelPipelineMap := map[string]ChannelPipelinesEntry{}
+	for _, ch := range channels {
+		channelPipelineMap[ch.Username] = ChannelPipelinesEntry{Username: ch.Username}
+	}
+	for _, p := range uploads.Pending {
+		if entry, ok := channelPipelineMap[p.Channel]; ok {
+			entry.Queued++
+			channelPipelineMap[p.Channel] = entry
+		}
+	}
+	for _, h := range uploads.History {
+		if entry, ok := channelPipelineMap[h.Channel]; ok {
+			if h.Failed {
+				entry.Failed++
+				channelPipelineMap[h.Channel] = entry
+			}
+		}
+	}
+
+	c.HTML(200, "admin.html", &AdminData{
+		Config:   server.Config,
+		Channels: channels,
+		Disk:     server.GetDiskInfo(),
+		Uploads:  uploads,
+		Orphans:  orphans,
+
+		SessionActive:    sessionActive,
+		SessionRemaining: sessionRemaining,
+		SessionDuration:  sessionDuration,
+
+		GoVersion:    runtime.Version(),
+		GoGoroutines: runtime.NumGoroutine(),
+		GoMemoryMB:   fmt.Sprintf("%.1f", float64(memStats.Alloc)/1024/1024),
+		GoNumCPU:     runtime.NumCPU(),
+		Uptime:       uptime,
+		FFmpegFound:  ffmpegFound,
+
+		TunnelURL: tunnelURL,
+
+		PipelineMap: channelPipelineMap,
+	})
+}
+
 // CreateChannelRequest represents the request body for creating a channel.
 type CreateChannelRequest struct {
 	Site                    string `form:"site"`
@@ -77,74 +238,74 @@ type CreateChannelRequest struct {
 
 // CreateChannel creates a new channel.
 func CreateChannel(c *gin.Context) {
-        var req *CreateChannelRequest
-        if err := c.Bind(&req); err != nil {
-                c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("bind: %v", err)})
-                return
-        }
+	var req *CreateChannelRequest
+	if err := c.Bind(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("bind: %v", err)})
+		return
+	}
 
-        var lastErr error
-        for _, username := range strings.Split(req.Username, ",") {
+	var lastErr error
+	for _, username := range strings.Split(req.Username, ",") {
 		if err := server.Manager.CreateChannel(&entity.ChannelConfig{
-				Site:                    req.Site,
-				Username:                username,
-				Framerate:               req.Framerate,
-				Resolution:              req.Resolution,
-				Pattern:                 req.Pattern,
-				MaxDuration:             req.MaxDuration,
-				MaxFilesize:             req.MaxFilesize,
-				Compress:                req.Compress,
-				MinDurationBeforeUpload: req.MinDurationBeforeUpload,
-				CreatedAt:               time.Now().Unix(),
-			}, true); err != nil {
-                        lastErr = err
-                        fmt.Printf("[ERROR] create channel %s: %v\n", username, err)
-                }
-        }
-        if lastErr != nil {
-                c.String(http.StatusInternalServerError, "Failed to save channel config: %v", lastErr)
-                return
-        }
-        // Ensure the session loop is running after adding a channel
-        server.Manager.StartSession(server.Config.SessionDurationParsed)
-        c.Redirect(http.StatusFound, "/")
+			Site:                    req.Site,
+			Username:                username,
+			Framerate:               req.Framerate,
+			Resolution:              req.Resolution,
+			Pattern:                 req.Pattern,
+			MaxDuration:             req.MaxDuration,
+			MaxFilesize:             req.MaxFilesize,
+			Compress:                req.Compress,
+			MinDurationBeforeUpload: req.MinDurationBeforeUpload,
+			CreatedAt:               time.Now().Unix(),
+		}, true); err != nil {
+			lastErr = err
+			fmt.Printf("[ERROR] create channel %s: %v\n", username, err)
+		}
+	}
+	if lastErr != nil {
+		c.String(http.StatusInternalServerError, "Failed to save channel config: %v", lastErr)
+		return
+	}
+	// Ensure the session loop is running after adding a channel
+	server.Manager.StartSession(server.Config.SessionDurationParsed)
+	c.Redirect(http.StatusFound, "/")
 }
 
 // StopChannel stops a channel.
 func StopChannel(c *gin.Context) {
-        if err := server.Manager.StopChannel(c.Param("username")); err != nil {
-                fmt.Printf("[ERROR] stop channel %s: %v\n", c.Param("username"), err)
-        }
+	if err := server.Manager.StopChannel(c.Param("username")); err != nil {
+		fmt.Printf("[ERROR] stop channel %s: %v\n", c.Param("username"), err)
+	}
 
-        if c.GetHeader("HX-Request") == "true" {
-                c.Header("HX-Redirect", "/")
-                c.Status(http.StatusNoContent)
-                return
-        }
-        c.Redirect(http.StatusFound, "/")
+	if c.GetHeader("HX-Request") == "true" {
+		c.Header("HX-Redirect", "/")
+		c.Status(http.StatusNoContent)
+		return
+	}
+	c.Redirect(http.StatusFound, "/")
 }
 
 // PauseChannel pauses a channel.
 func PauseChannel(c *gin.Context) {
-        if err := server.Manager.PauseChannel(c.Param("username")); err != nil {
-                fmt.Printf("[ERROR] pause channel %s: %v\n", c.Param("username"), err)
-        }
+	if err := server.Manager.PauseChannel(c.Param("username")); err != nil {
+		fmt.Printf("[ERROR] pause channel %s: %v\n", c.Param("username"), err)
+	}
 
-        c.Redirect(http.StatusFound, "/")
+	c.Redirect(http.StatusFound, "/")
 }
 
 // ResumeChannel resumes a paused channel.
 func ResumeChannel(c *gin.Context) {
-        if err := server.Manager.ResumeChannel(c.Param("username")); err != nil {
-                fmt.Printf("[ERROR] resume channel %s: %v\n", c.Param("username"), err)
-        }
+	if err := server.Manager.ResumeChannel(c.Param("username")); err != nil {
+		fmt.Printf("[ERROR] resume channel %s: %v\n", c.Param("username"), err)
+	}
 
-        c.Redirect(http.StatusFound, "/")
+	c.Redirect(http.StatusFound, "/")
 }
 
 // Updates handles the SSE connection for updates.
 func Updates(c *gin.Context) {
-        server.Manager.Subscriber(c.Writer, c.Request)
+	server.Manager.Subscriber(c.Writer, c.Request)
 }
 
 // UpdateConfigRequest represents the request body for updating configuration.
@@ -164,11 +325,11 @@ type UpdateConfigRequest struct {
 
 // UpdateConfig updates the server configuration from the Web UI form or API POST.
 func UpdateConfig(c *gin.Context) {
-        var req UpdateConfigRequest
-        if err := c.ShouldBind(&req); err != nil {
-                c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("bind: %v", err)})
-                return
-        }
+	var req UpdateConfigRequest
+	if err := c.ShouldBind(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("bind: %v", err)})
+		return
+	}
 
 	server.ConfigMu.Lock()
 	if req.Cookies != "" {
@@ -217,25 +378,25 @@ func UpdateConfig(c *gin.Context) {
 	}
 	server.ConfigMu.Unlock()
 
-        if req.StripchatPDKey != "" {
-                server.ConfigMu.Lock()
-                server.Config.StripchatPDKey = req.StripchatPDKey
-                server.ConfigMu.Unlock()
-        }
+	if req.StripchatPDKey != "" {
+		server.ConfigMu.Lock()
+		server.Config.StripchatPDKey = req.StripchatPDKey
+		server.ConfigMu.Unlock()
+	}
 
-        // Update uploader credentials (VOE.sx / Streamtape / Mixdrop)
-        if req.VoeSXAPIKey != "" || req.StreamtapeLogin != "" || req.StreamtapeKey != "" || req.MixdropEmail != "" || req.MixdropToken != "" {
-                server.UpdateUploaderCredentials(req.VoeSXAPIKey, req.StreamtapeLogin, req.StreamtapeKey, req.MixdropEmail, req.MixdropToken)
-        }
+	// Update uploader credentials (VOE.sx / Streamtape / Mixdrop)
+	if req.VoeSXAPIKey != "" || req.StreamtapeLogin != "" || req.StreamtapeKey != "" || req.MixdropEmail != "" || req.MixdropToken != "" {
+		server.UpdateUploaderCredentials(req.VoeSXAPIKey, req.StreamtapeLogin, req.StreamtapeKey, req.MixdropEmail, req.MixdropToken)
+	}
 
-        if err := server.SaveSettings(); err != nil {
-                fmt.Printf("[WARN] could not save settings: %v\n", err)
-        }
+	if err := server.SaveSettings(); err != nil {
+		fmt.Printf("[WARN] could not save settings: %v\n", err)
+	}
 
-        if c.ContentType() == "application/json" {
-                c.JSON(http.StatusOK, gin.H{"ok": true})
-                return
-        }
+	if c.ContentType() == "application/json" {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+		return
+	}
 	c.Redirect(http.StatusFound, "/")
 }
 
@@ -253,198 +414,198 @@ func extractCookieValue(cookieStr, name string) string {
 // isPathAllowed checks whether abs is inside the videos/ directory or the
 // configured OutputDir.  Returns false for any path outside those roots.
 func isPathAllowed(abs string) bool {
-        videosAbs, _ := filepath.Abs("videos")
-        if videosAbs != "" && strings.HasPrefix(abs, videosAbs+string(filepath.Separator)) || abs == videosAbs {
-                return true
-        }
-        if server.Config != nil && server.Config.OutputDir != "" {
-                outAbs, _ := filepath.Abs(server.Config.OutputDir)
-                if outAbs != "" && (strings.HasPrefix(abs, outAbs+string(filepath.Separator)) || abs == outAbs) {
-                        return true
-                }
-        }
-        return false
+	videosAbs, _ := filepath.Abs("videos")
+	if videosAbs != "" && strings.HasPrefix(abs, videosAbs+string(filepath.Separator)) || abs == videosAbs {
+		return true
+	}
+	if server.Config != nil && server.Config.OutputDir != "" {
+		outAbs, _ := filepath.Abs(server.Config.OutputDir)
+		if outAbs != "" && (strings.HasPrefix(abs, outAbs+string(filepath.Separator)) || abs == outAbs) {
+			return true
+		}
+	}
+	return false
 }
 
 // Download serves a video file for download.
 func Download(c *gin.Context) {
-        path := c.Query("path")
-        if path == "" {
-                c.AbortWithStatus(http.StatusBadRequest)
-                return
-        }
-        abs, err := filepath.Abs(path)
-        if err != nil {
-                c.AbortWithStatus(http.StatusBadRequest)
-                return
-        }
-        if !isPathAllowed(abs) {
-                c.AbortWithStatus(http.StatusForbidden)
-                return
-        }
-        c.FileAttachment(abs, filepath.Base(abs))
+	path := c.Query("path")
+	if path == "" {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	if !isPathAllowed(abs) {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	c.FileAttachment(abs, filepath.Base(abs))
 }
 
 // DeleteVideoRecord removes only the Supabase DB records for an uploaded-only video
 // (no local file to delete).
 func DeleteVideoRecord(c *gin.Context) {
-        filename := c.PostForm("filename")
-        if filename == "" {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
-        // Sanitize: only the base name is accepted, never a path
-        filename = filepath.Base(filename)
-        if filename == "." || filename == "" {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
-        if err := server.DeleteVideoCompletely(filename); err != nil {
-                fmt.Printf("[ERROR] delete video DB records for %s: %v\n", filename, err)
-        }
-        InvalidateVideosCache()
-        c.Redirect(http.StatusFound, "/videos")
+	filename := c.PostForm("filename")
+	if filename == "" {
+		c.Redirect(http.StatusFound, "/videos")
+		return
+	}
+	// Sanitize: only the base name is accepted, never a path
+	filename = filepath.Base(filename)
+	if filename == "." || filename == "" {
+		c.Redirect(http.StatusFound, "/videos")
+		return
+	}
+	if err := server.DeleteVideoCompletely(filename); err != nil {
+		fmt.Printf("[ERROR] delete video DB records for %s: %v\n", filename, err)
+	}
+	InvalidateVideosCache()
+	c.Redirect(http.StatusFound, "/videos")
 }
 
 // DeleteVideo removes a video file from disk and all associated data from Supabase.
 func DeleteVideo(c *gin.Context) {
-        path := c.PostForm("path")
-        if path == "" {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
-        abs, err := filepath.Abs(path)
-        if err != nil {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
-        if !isPathAllowed(abs) {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
+	path := c.PostForm("path")
+	if path == "" {
+		c.Redirect(http.StatusFound, "/videos")
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		c.Redirect(http.StatusFound, "/videos")
+		return
+	}
+	if !isPathAllowed(abs) {
+		c.Redirect(http.StatusFound, "/videos")
+		return
+	}
 
-        // Extract filename for DB cleanup
-        filename := filepath.Base(abs)
+	// Extract filename for DB cleanup
+	filename := filepath.Base(abs)
 
-        // Delete file from disk
-        if err := os.Remove(abs); err != nil {
-                fmt.Printf("[ERROR] delete video file %s: %v\n", abs, err)
-        }
+	// Delete file from disk
+	if err := os.Remove(abs); err != nil {
+		fmt.Printf("[ERROR] delete video file %s: %v\n", abs, err)
+	}
 
-        // Delete all associated data from Supabase
-        if err := server.DeleteVideoCompletely(filename); err != nil {
-                fmt.Printf("[ERROR] delete video DB records for %s: %v\n", filename, err)
-        }
+	// Delete all associated data from Supabase
+	if err := server.DeleteVideoCompletely(filename); err != nil {
+		fmt.Printf("[ERROR] delete video DB records for %s: %v\n", filename, err)
+	}
 
-        InvalidateVideosCache()
-        c.Redirect(http.StatusFound, "/videos")
+	InvalidateVideosCache()
+	c.Redirect(http.StatusFound, "/videos")
 }
 
 // Play streams a video file with Range header support for seeking.
 func Play(c *gin.Context) {
-        path := c.Query("path")
-        if path == "" {
-                c.AbortWithStatus(http.StatusBadRequest)
-                return
-        }
-        abs, err := filepath.Abs(path)
-        if err != nil {
-                c.AbortWithStatus(http.StatusBadRequest)
-                return
-        }
-        if !isPathAllowed(abs) {
-                c.AbortWithStatus(http.StatusForbidden)
-                return
-        }
-        file, err := os.Open(abs)
-        if err != nil {
-                c.AbortWithStatus(http.StatusNotFound)
-                return
-        }
-        defer file.Close()
+	path := c.Query("path")
+	if path == "" {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	if !isPathAllowed(abs) {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	file, err := os.Open(abs)
+	if err != nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	defer file.Close()
 
-        stat, err := file.Stat()
-        if err != nil {
-                c.AbortWithStatus(http.StatusInternalServerError)
-                return
-        }
-        fileSize := stat.Size()
+	stat, err := file.Stat()
+	if err != nil {
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	fileSize := stat.Size()
 
-        // Detect MIME type from extension
-        mimeType := detectVideoMIME(abs)
-        rangeHeader := c.GetHeader("Range")
-        c.Header("Accept-Ranges", "bytes")
-        c.Header("Cache-Control", "no-cache")
-        c.Header("Content-Type", mimeType)
+	// Detect MIME type from extension
+	mimeType := detectVideoMIME(abs)
+	rangeHeader := c.GetHeader("Range")
+	c.Header("Accept-Ranges", "bytes")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Content-Type", mimeType)
 
-        // Handle HEAD requests
-        if c.Request.Method == http.MethodHead {
-                c.Header("Content-Length", strconv.FormatInt(fileSize, 10))
-                c.Status(http.StatusOK)
-                return
-        }
+	// Handle HEAD requests
+	if c.Request.Method == http.MethodHead {
+		c.Header("Content-Length", strconv.FormatInt(fileSize, 10))
+		c.Status(http.StatusOK)
+		return
+	}
 
-        if rangeHeader == "" {
-                c.Header("Content-Length", strconv.FormatInt(fileSize, 10))
-                c.Status(http.StatusOK)
-                io.Copy(c.Writer, file)
-                return
-        }
+	if rangeHeader == "" {
+		c.Header("Content-Length", strconv.FormatInt(fileSize, 10))
+		c.Status(http.StatusOK)
+		io.Copy(c.Writer, file)
+		return
+	}
 
-        // Parse Range header: "bytes=start-end" or "bytes=start-"
-        var start, end int64
-        parsed := false
-        if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err == nil {
-                parsed = true
-        } else if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); err == nil {
-                parsed = true
-                end = fileSize - 1
-        }
-        if !parsed {
-                c.AbortWithStatus(http.StatusRequestedRangeNotSatisfiable)
-                return
-        }
-        if start < 0 {
-                start = 0
-        }
-        if end >= fileSize {
-                end = fileSize - 1
-        }
-        if start > end {
-                c.AbortWithStatus(http.StatusRequestedRangeNotSatisfiable)
-                return
-        }
+	// Parse Range header: "bytes=start-end" or "bytes=start-"
+	var start, end int64
+	parsed := false
+	if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err == nil {
+		parsed = true
+	} else if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); err == nil {
+		parsed = true
+		end = fileSize - 1
+	}
+	if !parsed {
+		c.AbortWithStatus(http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end >= fileSize {
+		end = fileSize - 1
+	}
+	if start > end {
+		c.AbortWithStatus(http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
 
-        contentLength := end - start + 1
-        c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
-        c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
-        c.Status(http.StatusPartialContent)
+	contentLength := end - start + 1
+	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+	c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
+	c.Status(http.StatusPartialContent)
 
-        file.Seek(start, 0)
-        io.CopyN(c.Writer, file, contentLength)
+	file.Seek(start, 0)
+	io.CopyN(c.Writer, file, contentLength)
 }
 
 func detectVideoMIME(path string) string {
-        ext := strings.ToLower(filepath.Ext(path))
-        switch ext {
-        case ".mp4":
-                return "video/mp4"
-        case ".ts":
-                return "video/MP2T"
-        case ".mkv":
-                return "video/x-matroska"
-        case ".webm":
-                return "video/webm"
-        case ".avi":
-                return "video/x-msvideo"
-        case ".mov":
-                return "video/quicktime"
-        default:
-                if t := mime.TypeByExtension(ext); t != "" {
-                        return t
-                }
-                return "video/mp4"
-        }
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".mp4":
+		return "video/mp4"
+	case ".ts":
+		return "video/MP2T"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".webm":
+		return "video/webm"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mov":
+		return "video/quicktime"
+	default:
+		if t := mime.TypeByExtension(ext); t != "" {
+			return t
+		}
+		return "video/mp4"
+	}
 }
 
 // VideoDetail renders the video detail page with an embedded player.
@@ -474,80 +635,80 @@ func VideoDetail(c *gin.Context) {
 	// Load preview URLs from Supabase
 	thumbURL, spriteURL, previewURL := server.LoadPreviewLinks(filename)
 
-        // Look up recording metadata from recordings DB
-        db := loadRecordings()
-        links := map[string]string{}
-        tags := []string{}
-        roomTitle := ""
-        viewers := 0
-        gender := ""
-        filesize := int64(0)
-        embedURL := ""
+	// Look up recording metadata from recordings DB
+	db := loadRecordings()
+	links := map[string]string{}
+	tags := []string{}
+	roomTitle := ""
+	viewers := 0
+	gender := ""
+	filesize := int64(0)
+	embedURL := ""
 	dbThumbnailURL := ""
 	dbSpriteURL := ""
 	dbPreviewURL := ""
 	timestamp := ""
-        resolution := ""
-        framerate := 0
-        var related []RecordingEntry
-        foundInDB := false
-        if db != nil {
-                for _, chanData := range db.Channels {
-                        for _, rec := range chanData.Recordings {
-                                if rec.Filename == filename {
-                                        foundInDB = true
-                                        if rec.Links != nil {
-                                                links = rec.Links
-                                        }
-                                        tags = rec.Tags
-                                        roomTitle = rec.RoomTitle
-                                        viewers = rec.Viewers
-                                        gender = chanData.Gender
-                                        filesize = rec.Filesize
+	resolution := ""
+	framerate := 0
+	var related []RecordingEntry
+	foundInDB := false
+	if db != nil {
+		for _, chanData := range db.Channels {
+			for _, rec := range chanData.Recordings {
+				if rec.Filename == filename {
+					foundInDB = true
+					if rec.Links != nil {
+						links = rec.Links
+					}
+					tags = rec.Tags
+					roomTitle = rec.RoomTitle
+					viewers = rec.Viewers
+					gender = chanData.Gender
+					filesize = rec.Filesize
 					embedURL = rec.EmbedURL
 					dbThumbnailURL = rec.ThumbnailURL
 					dbSpriteURL = rec.SpriteURL
 					dbPreviewURL = rec.PreviewURL
-                                        timestamp = rec.Timestamp
-                                        resolution = rec.Resolution
-                                        framerate = rec.Framerate
-                                        break
-                                }
-                        }
-                }
-                // Build same-channel recommendations directly from recordings DB
-                // (avoids a full filesystem walk + Supabase scan via scanVideos())
-                if db != nil {
-                        if chanData, ok := db.Channels[username]; ok {
-                                for _, rec := range chanData.Recordings {
-                                        if rec.Filename == filename {
-                                                continue
-                                        }
-                                        related = append(related, RecordingEntry{
-                                                Filename:     rec.Filename,
-                                                Timestamp:    rec.Timestamp,
-                                                RoomTitle:    rec.RoomTitle,
-                                                Tags:         rec.Tags,
-                                                Viewers:      rec.Viewers,
-                                                Resolution:   rec.Resolution,
-                                                Framerate:    rec.Framerate,
-                                                ThumbnailURL: rec.ThumbnailURL,
-                                                SpriteURL:    rec.SpriteURL,
-                                                PreviewURL:   rec.PreviewURL,
-                                        })
-                                        if len(related) >= 8 {
-                                                break
-                                        }
-                                }
-                        }
-                }
-        }
+					timestamp = rec.Timestamp
+					resolution = rec.Resolution
+					framerate = rec.Framerate
+					break
+				}
+			}
+		}
+		// Build same-channel recommendations directly from recordings DB
+		// (avoids a full filesystem walk + Supabase scan via scanVideos())
+		if db != nil {
+			if chanData, ok := db.Channels[username]; ok {
+				for _, rec := range chanData.Recordings {
+					if rec.Filename == filename {
+						continue
+					}
+					related = append(related, RecordingEntry{
+						Filename:     rec.Filename,
+						Timestamp:    rec.Timestamp,
+						RoomTitle:    rec.RoomTitle,
+						Tags:         rec.Tags,
+						Viewers:      rec.Viewers,
+						Resolution:   rec.Resolution,
+						Framerate:    rec.Framerate,
+						ThumbnailURL: rec.ThumbnailURL,
+						SpriteURL:    rec.SpriteURL,
+						PreviewURL:   rec.PreviewURL,
+					})
+					if len(related) >= 8 {
+						break
+					}
+				}
+			}
+		}
+	}
 
-        // If file is not on disk AND not in DB, redirect
-        if !fileOnDisk && !foundInDB {
-                c.Redirect(http.StatusFound, "/videos")
-                return
-        }
+	// If file is not on disk AND not in DB, redirect
+	if !fileOnDisk && !foundInDB {
+		c.Redirect(http.StatusFound, "/videos")
+		return
+	}
 
 	// Fall back to recordings DB if preview_links table had empty URLs
 	if thumbURL == "" && dbThumbnailURL != "" {
@@ -560,56 +721,56 @@ func VideoDetail(c *gin.Context) {
 		previewURL = dbPreviewURL
 	}
 
-        hostPlayers := buildHostPlayers(links)
+	hostPlayers := buildHostPlayers(links)
 
-        // If embed URL is empty, try to generate one from upload links
-        if embedURL == "" {
-                for _, player := range hostPlayers {
-                        if player.EmbedURL != "" {
-                                embedURL = player.EmbedURL
-                                break
-                        }
-                }
-        }
+	// If embed URL is empty, try to generate one from upload links
+	if embedURL == "" {
+		for _, player := range hostPlayers {
+			if player.EmbedURL != "" {
+				embedURL = player.EmbedURL
+				break
+			}
+		}
+	}
 
-        hostPlayersJSONBytes, _ := json.Marshal(hostPlayers)
-        hostPlayersJSON := template.JS(hostPlayersJSONBytes)
+	hostPlayersJSONBytes, _ := json.Marshal(hostPlayers)
+	hostPlayersJSON := template.JS(hostPlayersJSONBytes)
 
-        // Find a direct video URL from upload links (for native player fallback).
-        videoURL := ""
-        if embedURL == "" {
-                for _, player := range hostPlayers {
-                        if player.VideoURL != "" {
-                                videoURL = player.VideoURL
-                                break
-                        }
-                }
-        }
+	// Find a direct video URL from upload links (for native player fallback).
+	videoURL := ""
+	if embedURL == "" {
+		for _, player := range hostPlayers {
+			if player.VideoURL != "" {
+				videoURL = player.VideoURL
+				break
+			}
+		}
+	}
 
-        // Build template vars
-        fullPath := ""
-        size := ""
-        modTime := ""
-        mimeType := "video/mp4"
-        if fileOnDisk {
-                fullPath = abs
-                size = internal.FormatFilesize(int(stat.Size()))
-                modTime = stat.ModTime().Format("2006-01-02 15:04")
-                mimeType = detectVideoMIME(abs)
-        } else if foundInDB {
-                if filesize > 0 {
-                        size = internal.FormatFilesize(int(filesize))
-                } else {
-                        size = "uploaded"
-                }
-                if timestamp != "" {
-                        if t, err := time.Parse("2006-01-02T15:04:05Z", timestamp); err == nil {
-                                modTime = t.Format("2006-01-02 15:04")
-                        } else {
-                                modTime = timestamp
-                        }
-                }
-        }
+	// Build template vars
+	fullPath := ""
+	size := ""
+	modTime := ""
+	mimeType := "video/mp4"
+	if fileOnDisk {
+		fullPath = abs
+		size = internal.FormatFilesize(int(stat.Size()))
+		modTime = stat.ModTime().Format("2006-01-02 15:04")
+		mimeType = detectVideoMIME(abs)
+	} else if foundInDB {
+		if filesize > 0 {
+			size = internal.FormatFilesize(int(filesize))
+		} else {
+			size = "uploaded"
+		}
+		if timestamp != "" {
+			if t, err := time.Parse("2006-01-02T15:04:05Z", timestamp); err == nil {
+				modTime = t.Format("2006-01-02 15:04")
+			} else {
+				modTime = timestamp
+			}
+		}
+	}
 
 	c.HTML(200, "video.html", gin.H{
 		"Config":          server.Config,
@@ -638,131 +799,131 @@ func VideoDetail(c *gin.Context) {
 }
 
 func buildHostPlayers(links map[string]string) []hostPlayer {
-        if len(links) == 0 {
-                return nil
-        }
+	if len(links) == 0 {
+		return nil
+	}
 
-        hosts := make([]string, 0, len(links))
-        for host := range links {
-                hosts = append(hosts, host)
-        }
-        sort.Strings(hosts)
+	hosts := make([]string, 0, len(links))
+	for host := range links {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
 
-        players := make([]hostPlayer, 0, len(hosts))
-        for _, host := range hosts {
-                link := links[host]
-                players = append(players, hostPlayer{
-                        Host:     host,
-                        Link:     link,
-                        EmbedURL: embedURLForHostLink(host, link),
-                        VideoURL: videoURLForHostLink(host, link),
-                })
-        }
-        return players
+	players := make([]hostPlayer, 0, len(hosts))
+	for _, host := range hosts {
+		link := links[host]
+		players = append(players, hostPlayer{
+			Host:     host,
+			Link:     link,
+			EmbedURL: embedURLForHostLink(host, link),
+			VideoURL: videoURLForHostLink(host, link),
+		})
+	}
+	return players
 }
 
 func embedURLForHostLink(host, link string) string {
-        if link == "" {
-                return ""
-        }
-        normalizedHost := strings.ToLower(host)
-        normalizedLink := strings.ToLower(link)
+	if link == "" {
+		return ""
+	}
+	normalizedHost := strings.ToLower(host)
+	normalizedLink := strings.ToLower(link)
 
-        if strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/") {
-                if code := extractFileCode(link); code != "" {
-                        return "https://voe.sx/e/" + code
-                }
-        }
-        if strings.Contains(normalizedHost, "streamtape") || strings.Contains(normalizedLink, "streamtape.com/") {
-                if code := extractFileCode(link); code != "" {
-                        return "https://streamtape.com/e/" + code + "/"
-                }
-                return link
-        }
-        if strings.Contains(normalizedHost, "mixdrop") || strings.Contains(normalizedLink, "mixdrop.") {
-                if code := extractFileCode(link); code != "" {
-                        return "https://mixdrop.ag/e/" + code
-                }
-                return link
-        }
+	if strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/") {
+		if code := extractFileCode(link); code != "" {
+			return "https://voe.sx/e/" + code
+		}
+	}
+	if strings.Contains(normalizedHost, "streamtape") || strings.Contains(normalizedLink, "streamtape.com/") {
+		if code := extractFileCode(link); code != "" {
+			return "https://streamtape.com/e/" + code + "/"
+		}
+		return link
+	}
+	if strings.Contains(normalizedHost, "mixdrop") || strings.Contains(normalizedLink, "mixdrop.") {
+		if code := extractFileCode(link); code != "" {
+			return "https://mixdrop.ag/e/" + code
+		}
+		return link
+	}
 	if strings.Contains(normalizedHost, "gofile") || strings.Contains(normalizedLink, "gofile.io/") {
-                return ""
-        }
-        return ""
+		return ""
+	}
+	return ""
 }
 
 func videoURLForHostLink(host, link string) string {
-        if link == "" {
-                return ""
-        }
+	if link == "" {
+		return ""
+	}
 
-        normalizedHost := strings.ToLower(host)
-        normalizedLink := strings.ToLower(link)
+	normalizedHost := strings.ToLower(host)
+	normalizedLink := strings.ToLower(link)
 
-        switch {
-        case strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/"):
-                if code := extractFileCode(link); code != "" {
-                        return "https://voe.sx/e/" + code
-                }
-                return link
-        case strings.Contains(normalizedHost, "streamtape") || strings.Contains(normalizedLink, "streamtape.com/"):
-                if code := extractFileCode(link); code != "" {
-                        return "https://streamtape.com/e/" + code + "/"
-                }
-                return link
-        case strings.Contains(normalizedHost, "mixdrop") || strings.Contains(normalizedLink, "mixdrop."):
-                if code := extractFileCode(link); code != "" {
-                        return "https://mixdrop.ag/e/" + code
-                }
-                return link
+	switch {
+	case strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/"):
+		if code := extractFileCode(link); code != "" {
+			return "https://voe.sx/e/" + code
+		}
+		return link
+	case strings.Contains(normalizedHost, "streamtape") || strings.Contains(normalizedLink, "streamtape.com/"):
+		if code := extractFileCode(link); code != "" {
+			return "https://streamtape.com/e/" + code + "/"
+		}
+		return link
+	case strings.Contains(normalizedHost, "mixdrop") || strings.Contains(normalizedLink, "mixdrop."):
+		if code := extractFileCode(link); code != "" {
+			return "https://mixdrop.ag/e/" + code
+		}
+		return link
 	case strings.Contains(normalizedHost, "gofile") || strings.Contains(normalizedLink, "gofile.io/"):
 		return ""
-        default:
-                return ""
-        }
+	default:
+		return ""
+	}
 }
 
 // ─── Tunnel API ──────────────────────────────────────────────────────────────
 
 type tunnelRequest struct {
-        URL   string `json:"url" form:"url"`
-        RunID int    `json:"run_id" form:"run_id"`
+	URL   string `json:"url" form:"url"`
+	RunID int    `json:"run_id" form:"run_id"`
 }
 
 // UpdateTunnel saves a tunnel URL to Supabase.
 func UpdateTunnel(c *gin.Context) {
-        var req tunnelRequest
-        if err := c.ShouldBind(&req); err != nil {
-                c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("bind: %v", err)})
-                return
-        }
-        if req.URL == "" {
-                c.AbortWithStatus(http.StatusBadRequest)
-                return
-        }
-        if err := server.SaveTunnelToDB(req.URL, req.RunID); err != nil {
-                c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-                return
-        }
-        c.JSON(http.StatusOK, gin.H{"ok": true})
+	var req tunnelRequest
+	if err := c.ShouldBind(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("bind: %v", err)})
+		return
+	}
+	if req.URL == "" {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	if err := server.SaveTunnelToDB(req.URL, req.RunID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // GetTunnel returns the current active tunnel URL.
 func GetTunnel(c *gin.Context) {
-        url, err := server.LoadCurrentTunnel()
-        if err != nil {
-                c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-                return
-        }
-        c.JSON(http.StatusOK, gin.H{"url": url})
+	url, err := server.LoadCurrentTunnel()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"url": url})
 }
 
 func extractFileCode(link string) string {
-        parts := strings.Split(strings.TrimRight(link, "/"), "/")
-        if len(parts) > 0 {
-                return parts[len(parts)-1]
-        }
-        return ""
+	parts := strings.Split(strings.TrimRight(link, "/"), "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return ""
 }
 
 // ─── Orphan Management API ────────────────────────────────────────────────────
@@ -902,9 +1063,9 @@ var (
 )
 
 type thumbCacheEntry struct {
-	data      []byte
+	data        []byte
 	contentType string
-	expiresAt time.Time
+	expiresAt   time.Time
 }
 
 // ServeLiveThumb serves a live thumbnail for a channel.  It always tries to
