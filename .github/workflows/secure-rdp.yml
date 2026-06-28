@@ -96,7 +96,7 @@ jobs:
 
           function Test-Proxy($proxyUrl) {
             try {
-              $ip = curl.exe -x $proxyUrl -s -m 8 https://api.ipify.org 2>$null
+              $ip = curl.exe -x $proxyUrl -s -m 5 https://api.ipify.org 2>$null
               if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { return $ip.Trim() }
             } catch {}
             return $null
@@ -159,7 +159,7 @@ jobs:
             if (-not $ip) { continue }
 
             try {
-              $locRaw = curl.exe -x $p -s -m 8 https://ipinfo.io/json 2>$null
+              $locRaw = curl.exe -x $p -s -m 5 https://ipinfo.io/json 2>$null
               if ($locRaw) {
                 $loc = $locRaw | ConvertFrom-Json -ErrorAction Stop
                 $country = $loc.country
