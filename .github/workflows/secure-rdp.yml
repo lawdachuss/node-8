@@ -35,7 +35,7 @@ jobs:
           }
           
           # Fetch recent runs of the same workflow
-          $runsJson = gh run list --workflow secure-rdp.yml --repo "$env:GITHUB_REPOSITORY" --limit 10 --json databaseId,status,startedAt
+          $runsJson = gh run list --workflow secure-rdp.yml --repo "$env:GITHUB_REPOSITORY" --limit 10 --json databaseId,status,conclusion,startedAt
           if ($LASTEXITCODE -ne 0) {
             Write-Warning "Failed to fetch run list from GitHub API. Proceeding..."
             exit 0
@@ -45,16 +45,20 @@ jobs:
           $hasActiveOverlap = $false
           
           foreach ($run in $runs) {
-            if ($run.databaseId -ne $currentRunId -and $run.status -eq 'in_progress') {
+            if ($run.databaseId -ne $currentRunId -and $run.status -eq 'in_progress' -and ($null -eq $run.conclusion -or $run.conclusion -eq '')) {
               $startedAt = [DateTime]::Parse($run.startedAt).ToUniversalTime()
               $now = [DateTime]::UtcNow
               $elapsedMinutes = ($now - $startedAt).TotalMinutes
               
-              Write-Host "Found other in_progress run: ID=$($run.databaseId), StartedAt=$startedAt ($elapsedMinutes minutes ago)"
+              Write-Host "Found other active run: ID=$($run.databaseId), StartedAt=$startedAt ($elapsedMinutes minutes ago)"
               
               if ($elapsedMinutes -lt 348) {
                 $hasActiveOverlap = $true
                 break
+              }
+            } else {
+              if ($run.databaseId -ne $currentRunId) {
+                Write-Host "Skipping run ID=$($run.databaseId) (status=$($run.status), conclusion=$($run.conclusion))"
               }
             }
           }
