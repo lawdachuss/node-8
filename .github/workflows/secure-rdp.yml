@@ -329,12 +329,28 @@ jobs:
           & $tailscale status
 
           $ip = $null
-          for ($i = 0; $i -lt 15; $i++) {
-            try {
-              $candidate = (& $tailscale ip -4 2>&1 | Select-Object -First 1).Trim()
-              if ($candidate -match '^\d+\.\d+\.\d+\.\d+$') { $ip = $candidate; break }
-            } catch {}
+          for ($attempt = 0; $attempt -lt 2; $attempt++) {
+            $ip = $null
+            for ($i = 0; $i -lt 15; $i++) {
+              try {
+                $candidate = (& $tailscale ip -4 2>&1 | Select-Object -First 1).Trim()
+                if ($candidate -match '^\d+\.\d+\.\d+\.\d+$') { $ip = $candidate; break }
+              } catch {}
+              Start-Sleep -Seconds 3
+            }
+            if ($ip) { break }
+            Write-Host "Retrying Tailscale auth (attempt $($attempt+1))..."
+            & $tailscale logout
             Start-Sleep -Seconds 3
+            & $tailscale up `
+              --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" `
+              --hostname="github-rdp-${{ github.run_id }}" `
+              --accept-routes `
+              --accept-dns=false `
+              --timeout=60s `
+              --reset
+            if ($LASTEXITCODE -ne 0) { Write-Error "tailscale up retry failed"; exit 1 }
+            Start-Sleep -Seconds 5
           }
           if (-not $ip) { Write-Error "No Tailscale IP assigned after 45s"; exit 1 }
 
