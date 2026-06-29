@@ -338,11 +338,27 @@ func (c *Client) GetRecordingsByUsername(username string) ([]Recording, error) {
 	return recordings, err
 }
 
-// GetAllRecordings retrieves all recordings
+// GetAllRecordings retrieves all recordings by paginating through the
+// result set using PostgREST offset/limit (max 1000 per page). This is
+// necessary because Supabase free tier caps single-query results at 1000.
 func (c *Client) GetAllRecordings() ([]Recording, error) {
-	var recordings []Recording
-	err := c.get("/recordings?order=timestamp.desc&limit=50000", &recordings)
-	return recordings, err
+	var all []Recording
+	offset := 0
+	pageSize := 1000
+
+	for {
+		var page []Recording
+		path := fmt.Sprintf("/recordings?order=timestamp.desc&limit=%d&offset=%d", pageSize, offset)
+		if err := c.get(path, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			break
+		}
+		offset += pageSize
+	}
+	return all, nil
 }
 
 // DeleteRecording removes a recording
@@ -412,12 +428,27 @@ func (c *Client) GetUploadLinks(recordingID string) ([]UploadLink, error) {
 	return links, err
 }
 
-// GetAllUploadLinks retrieves ALL upload links in a single batch query.
-// The caller can group by recording_id for O(1) per-recording lookup.
+// GetAllUploadLinks retrieves ALL upload links by paginating through the
+// result set using PostgREST Range headers (max 1000 per page). This is
+// necessary because Supabase free tier caps single-query results at 1000.
 func (c *Client) GetAllUploadLinks() ([]UploadLink, error) {
-	var links []UploadLink
-	err := c.get("/upload_links?limit=50000", &links)
-	return links, err
+	var allLinks []UploadLink
+	offset := 0
+	pageSize := 1000
+
+	for {
+		var page []UploadLink
+		path := fmt.Sprintf("/upload_links?limit=%d&offset=%d", pageSize, offset)
+		if err := c.get(path, &page); err != nil {
+			return nil, err
+		}
+		allLinks = append(allLinks, page...)
+		if len(page) < pageSize {
+			break
+		}
+		offset += pageSize
+	}
+	return allLinks, nil
 }
 
 // ============================================================================
@@ -580,11 +611,27 @@ func (c *Client) GetPreviewImage(filename string) (*PreviewImage, error) {
 	return &images[0], nil
 }
 
-// GetAllPreviewImages returns all preview images from the database.
+// GetAllPreviewImages returns all preview images by paginating through the
+// result set using PostgREST offset/limit (max 1000 per page). This is
+// necessary because Supabase free tier caps single-query results at 1000.
 func (c *Client) GetAllPreviewImages() ([]PreviewImage, error) {
-	var images []PreviewImage
-	err := c.get("/preview_images?limit=50000", &images)
-	return images, err
+	var all []PreviewImage
+	offset := 0
+	pageSize := 1000
+
+	for {
+		var page []PreviewImage
+		path := fmt.Sprintf("/preview_images?limit=%d&offset=%d", pageSize, offset)
+		if err := c.get(path, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			break
+		}
+		offset += pageSize
+	}
+	return all, nil
 }
 
 // ============================================================================

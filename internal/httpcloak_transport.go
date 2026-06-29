@@ -128,6 +128,31 @@ func (t *httpcloakTransport) rotateProxy() bool {
 	return true
 }
 
+// refreshProxies re-reads the proxy list from the current config and
+// resets the client to use the first (presumably freshest) proxy.
+// Returns true if new proxies were loaded, false if the list is empty.
+// This is called when all proxies in the current list have failed,
+// allowing the DVR to pick up environment variable updates without a restart.
+func (t *httpcloakTransport) refreshProxies() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	newProxies := configuredProxyURLs()
+	if len(newProxies) == 0 {
+		return false
+	}
+
+	// Close old client if it exposes a Close method
+	if c, ok := interface{}(t.client).(interface{ Close() error }); ok {
+		c.Close()
+	}
+
+	t.proxyURLs = newProxies
+	t.proxyIdx = 0
+	t.client = newCloakClient(proxyURLAt(newProxies, 0))
+	return true
+}
+
 // WarmupChaturbate makes an initial request to chaturbate.com to establish
 // TLS session tickets with Cloudflare before any API calls are made.
 // This gives subsequent requests TLS session resumption, making them look
@@ -315,55 +340,113 @@ func (t *httpcloakTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	// Try up to len(proxyURLs) attempts, rotating proxy on connection failures.
-	for attempt := 0; attempt < max(1, len(t.proxyURLs)); attempt++ {
-		t.mu.Lock()
-		client := t.client
-		t.mu.Unlock()
+	// If all proxies fail, try to refresh the proxy list from env and retry once.
+	// Track per-proxy errors for better diagnostics.
+	for refresh := 0; refresh < 2; refresh++ {
+		for attempt := 0; attempt < max(1, len(t.proxyURLs)); attempt++ {
+			t.mu.Lock()
+			client := t.client
+			currentProxy := proxyURLAt(t.proxyURLs, t.proxyIdx)
+			t.mu.Unlock()
 
-		cloakReq := &httpcloak.Request{
-			Method:  req.Method,
-			URL:     req.URL.String(),
-			Headers: req.Header,
-		}
-		if len(bodyBytes) > 0 {
-			cloakReq.Body = bytes.NewReader(bodyBytes)
-		}
-
-		cloakResp, err := client.Do(ctx, cloakReq)
-
-		if err == nil {
-			body, bodyErr := cloakResp.Bytes()
-			if bodyErr != nil {
-				cloakResp.Close()
-				return nil, bodyErr
+			cloakReq := &httpcloak.Request{
+				Method:  req.Method,
+				URL:     req.URL.String(),
+				Headers: req.Header,
+			}
+			if len(bodyBytes) > 0 {
+				cloakReq.Body = bytes.NewReader(bodyBytes)
 			}
 
-			resp := &http.Response{
-				StatusCode: cloakResp.StatusCode,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(bytes.NewReader(body)),
-				Request:    req,
-			}
-			if cloakResp.Headers != nil {
-				for k, vs := range cloakResp.Headers {
-					for _, v := range vs {
-						resp.Header.Add(k, v)
+			cloakResp, err := client.Do(ctx, cloakReq)
+
+			if err == nil {
+				body, bodyErr := cloakResp.Bytes()
+				if bodyErr != nil {
+					cloakResp.Close()
+					return nil, bodyErr
+				}
+
+				resp := &http.Response{
+					StatusCode: cloakResp.StatusCode,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Request:    req,
+				}
+				if cloakResp.Headers != nil {
+					for k, vs := range cloakResp.Headers {
+						for _, v := range vs {
+							resp.Header.Add(k, v)
+						}
 					}
 				}
+				return resp, nil
 			}
-			return resp, nil
+
+			// Proxy connection failure — rotate to next proxy in the list
+			if isProxyError(err) {
+				if t.rotateProxy() {
+					continue
+				}
+				// Only 1 proxy URL configured and it failed — log the specific error
+				return nil, fmt.Errorf("proxy %s: %w", maskProxyHost(currentProxy), err)
+			}
+			// Non-proxy error (e.g. HTTP-level failure) — surface immediately
+			return nil, err
 		}
 
-		// Proxy connection failure — rotate to next proxy in the list
-		if isProxyError(err) {
-			if t.rotateProxy() {
-				continue
-			}
+		// All proxies in the current list failed. Try to refresh from env.
+		// This handles the case where free proxies have died and the env
+		// was updated (e.g. by a wrapper script that re-fetches proxy lists).
+		if t.refreshProxies() {
+			fmt.Printf("[proxy] all proxies failed — refreshed proxy list from env, retrying with %d URLs\n",
+				len(t.proxyURLs))
+			continue
 		}
-		return nil, err
+		break
 	}
 
-	return nil, fmt.Errorf("all proxies failed")
+	// Build a detailed error message with all proxy URLs tried
+	t.mu.Lock()
+	proxyCount := len(t.proxyURLs)
+	firstProxy := ""
+	if proxyCount > 0 {
+		firstProxy = maskProxyHost(t.proxyURLs[0])
+	}
+	t.mu.Unlock()
+
+	return nil, fmt.Errorf("all %d proxies failed (first: %s) — proxy URLs may be unreachable; check proxy configuration or refresh the proxy list",
+		proxyCount, firstProxy)
+}
+
+// maskProxyHost masks the password portion of a proxy URL for safe logging.
+// e.g. "socks5://user:pass@host:1080" → "socks5://user:***@host:1080"
+func maskProxyHost(proxyURL string) string {
+	if proxyURL == "" {
+		return "(none)"
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		// If we can't parse it, just show the scheme + host
+		if strings.Contains(proxyURL, "@") {
+			parts := strings.SplitN(proxyURL, "@", 2)
+			return "***@" + parts[len(parts)-1]
+		}
+		return proxyURL
+	}
+	if u.User != nil {
+		if _, hasPW := u.User.Password(); hasPW {
+			u.User = url.UserPassword(u.User.Username(), "***")
+		} else {
+			u.User = url.User(u.User.Username())
+		}
+		return u.String()
+	}
+	// No auth — just show the host:port
+	if u.Host != "" {
+		return u.Scheme + "://" + u.Host
+	}
+	return proxyURL
 }
 
 // max returns the larger of a and b.

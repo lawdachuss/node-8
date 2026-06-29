@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -79,6 +80,8 @@ func (u *SeekStreamingUploader) UploadWithProgress(filePath string, progress Pro
 	if err != nil {
 		return "", fmt.Errorf("seekstreaming: %w", err)
 	}
+	fmt.Printf("[seekstreaming] got upload endpoint — tusUrl=%s accessToken=%s\n",
+		maskSensitiveURL(ep.TusURL), maskSensitive(ep.AccessToken))
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -104,6 +107,9 @@ func (u *SeekStreamingUploader) UploadWithProgress(filePath string, progress Pro
 			return "", lastErr
 		}
 
+		// Mask the upload URL for logging (it may contain a video ID or token)
+		fmt.Printf("[seekstreaming] tus upload created — Location: %s\n", maskSensitiveURL(uploadURL))
+
 		videoID, err := u.uploadFileTUS(uploadURL, filePath, progress)
 		if err != nil {
 			lastErr = fmt.Errorf("upload file: %w", err)
@@ -122,7 +128,23 @@ func (u *SeekStreamingUploader) UploadWithProgress(filePath string, progress Pro
 			return "", lastErr
 		}
 
-		return fmt.Sprintf("https://chuglii.embedseek.com/#%s", videoID), nil
+		// Log the video ID we extracted from the TUS upload URL
+		fmt.Printf("[seekstreaming] upload complete — extracted videoID=%s\n", videoID)
+
+		// Verify the uploaded video exists by calling the manage API.
+		// Log the response so we can confirm the video is accessible and
+		// see the assetUrl which may indicate the correct embed URL format.
+		_, verifyErr := GetSeekStreamingPosterURL(u.key, videoID)
+		if verifyErr != nil {
+			fmt.Printf("[seekstreaming] WARNING: manage API verification failed for videoID=%s: %v\n",
+				videoID, verifyErr)
+		} else {
+			fmt.Printf("[seekstreaming] manage API OK — assetUrl/poster available for videoID=%s\n", videoID)
+		}
+
+		embedURL := fmt.Sprintf("https://chuglii.embedseek.com/#%s", videoID)
+		fmt.Printf("[seekstreaming] embed URL: %s\n", embedURL)
+		return embedURL, nil
 	}
 	return "", lastErr
 }
@@ -339,21 +361,46 @@ func GetSeekStreamingPosterURL(key, videoID string) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	_body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("status %d", resp.StatusCode)
+		return "", fmt.Errorf("status %d — %s", resp.StatusCode, strings.TrimSpace(string(_body)))
 	}
 
 	var detail struct {
 		Poster   string `json:"poster"`
 		AssetURL string `json:"assetUrl"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		return "", fmt.Errorf("decode: %w", err)
+	if err := json.Unmarshal(_body, &detail); err != nil {
+		return "", fmt.Errorf("decode: %w (body: %s)", err, string(_body))
 	}
 	if detail.Poster == "" || detail.AssetURL == "" {
-		return "", fmt.Errorf("no poster available")
+		return "", fmt.Errorf("no poster available — response: %s", string(_body))
 	}
 	return detail.AssetURL + detail.Poster, nil
+}
+
+// maskSensitive masks a sensitive string for logging (shows first 4 + last 4 chars).
+func maskSensitive(s string) string {
+	if s == "" {
+		return "<empty>"
+	}
+	if len(s) < 12 {
+		return "<masked>"
+	}
+	return s[:4] + "..." + s[len(s)-4:]
+}
+
+// maskSensitiveURL masks sensitive parts of a URL for logging (shows scheme + host, masks path).
+func maskSensitiveURL(rawURL string) string {
+	if rawURL == "" {
+		return "<empty>"
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<invalid-url>"
+	}
+	return u.Scheme + "://" + u.Host + "/..."
 }
 
 func mimeTypeByExt(ext string) string {

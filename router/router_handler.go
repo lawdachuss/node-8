@@ -292,13 +292,24 @@ func CreateChannel(c *gin.Context) {
 	if client := server.GetDBClient(); client != nil {
 		var conflicts []string
 		for _, username := range usernames {
+			// Check channels table (isolated mode)
 			existing, err := client.GetChannel(username)
 			if err == nil && existing != nil {
 				conflicts = append(conflicts, username)
+				continue
+			}
+			// Check pool assignments table (pooled mode)
+			site := req.Site
+			if site == "" {
+				site = "chaturbate"
+			}
+			assignment, aErr := client.GetAssignment(username, site)
+			if aErr == nil && assignment != nil {
+				conflicts = append(conflicts, username+" (in pool)")
 			}
 		}
 		if len(conflicts) > 0 {
-			c.String(http.StatusConflict, "Channel(s) already exist in database: %s", strings.Join(conflicts, ", "))
+			c.String(http.StatusConflict, "Channel(s) already exist: %s", strings.Join(conflicts, ", "))
 			return
 		}
 	}
@@ -1449,10 +1460,16 @@ func AddToPool(c *gin.Context) {
 		return
 	}
 
-	// Check if already in pool
+	// Check if already exists in the channels table (isolated mode)
+	if existingCh, chErr := client.GetChannel(req.Username); chErr == nil && existingCh != nil {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("channel '%s' already exists in database", req.Username)})
+		return
+	}
+
+	// Check if already in pool assignments
 	existing, err := client.GetAssignment(req.Username, req.Site)
 	if err == nil && existing != nil {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "channel already in pool"})
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("channel '%s' already exists in pool", req.Username)})
 		return
 	}
 
