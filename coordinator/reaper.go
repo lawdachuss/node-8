@@ -38,7 +38,14 @@ func (c *Coordinator) StartReaperLoop(ctx context.Context) {
 
 // runReapCycle finds dead nodes and reclaims their channel assignments.
 func (c *Coordinator) runReapCycle(timeout time.Duration) {
-	// Find nodes with expired heartbeats
+	// Repair orphaned rows so downstream counts are accurate.
+	if repaired, err := c.Client.RepairOrphanedAssignments(); err != nil {
+		log.Printf("[coordinator] reaper: repair orphaned error: %v", err)
+	} else if repaired > 0 {
+		log.Printf("[coordinator] reaper: repaired %d orphaned assignment(s)", repaired)
+	}
+
+	// Find nodes with expired heartbeats (any status).
 	deadNodeIDs, err := c.Client.GetDeadNodes(timeout)
 	if err != nil {
 		log.Printf("[coordinator] reaper: get dead nodes error: %v", err)
@@ -50,7 +57,6 @@ func (c *Coordinator) runReapCycle(timeout time.Duration) {
 	}
 
 	for _, deadNodeID := range deadNodeIDs {
-		// Skip ourselves
 		if deadNodeID == c.NodeID {
 			continue
 		}
@@ -66,7 +72,6 @@ func (c *Coordinator) runReapCycle(timeout time.Duration) {
 				reclaimed, deadNodeID)
 		}
 
-		// Mark the dead node as offline
 		if err := c.Client.UpdateNodeStatus(deadNodeID, "offline"); err != nil {
 			log.Printf("[coordinator] reaper: update status for %s error: %v", deadNodeID, err)
 		}

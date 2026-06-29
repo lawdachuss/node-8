@@ -926,8 +926,10 @@ func (c *Client) ClaimSpecificChannel(username, site, nodeID string) (bool, erro
 }
 
 // ReleaseNodeChannels releases all channels currently assigned to a node.
+// Does NOT filter by status so even orphaned rows (assigned_node set but
+// status=unassigned) are correctly freed.
 func (c *Client) ReleaseNodeChannels(nodeID string) error {
-	return c.patch(fmt.Sprintf("/channel_assignments?assigned_node=eq.%s&status=neq.unassigned", url.QueryEscape(nodeID)),
+	return c.patch(fmt.Sprintf("/channel_assignments?assigned_node=eq.%s", url.QueryEscape(nodeID)),
 		map[string]interface{}{
 			"assigned_node": nil,
 			"status":        "unassigned",
