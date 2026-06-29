@@ -41,6 +41,7 @@ func detectTailscaleIP() string {
 type ChannelManager interface {
 	CreateChannelFromAssignment(ca *database.ChannelAssignment) error
 	RemoveChannelForReassignment(username string) error
+	GetLocalChannels() []string
 }
 
 // LivenessChecker is the interface for checking if a channel is currently live.

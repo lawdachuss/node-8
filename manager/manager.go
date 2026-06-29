@@ -456,6 +456,19 @@ func (m *Manager) RemoveChannelForReassignment(username string) error {
 	return nil
 }
 
+// GetLocalChannels implements coordinator.ChannelManager.
+// Returns the list of usernames of channels active on this node.
+func (m *Manager) GetLocalChannels() []string {
+	var list []string
+	m.Channels.Range(func(key, value interface{}) bool {
+		if username, ok := key.(string); ok {
+			list = append(list, username)
+		}
+		return true
+	})
+	return list
+}
+
 // ScanThumbnails walks the videos directory and generates thumbnails for any
 // video file that is missing preview URLs in Supabase.
 func (m *Manager) ScanThumbnails() {

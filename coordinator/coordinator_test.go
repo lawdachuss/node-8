@@ -30,6 +30,14 @@ func (m *mockChannelManager) RemoveChannelForReassignment(username string) error
 	return nil
 }
 
+func (m *mockChannelManager) GetLocalChannels() []string {
+	var list []string
+	for _, ca := range m.created {
+		list = append(list, ca.Username)
+	}
+	return list
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

@@ -80,6 +80,49 @@ func (c *Coordinator) runClaimCycle() {
 		log.Printf("[coordinator] repaired %d orphaned assignment(s) (assigned_node set but status=unassigned)", repaired)
 	}
 
+	// Reconcile database assignments with local manager channels.
+	// This ensures we stop any channel that got reassigned away (e.g. by reaper)
+	// and start any channel assigned to us that we missed or failed to start.
+	dbAssignments, err := c.Client.GetNodeAssignments(c.NodeID)
+	if err != nil {
+		log.Printf("[coordinator] claim cycle: get node assignments error: %v", err)
+		return
+	}
+
+	localChannels := c.Manager.GetLocalChannels()
+
+	// 1. Remove local channels that are no longer assigned to this node in DB
+	dbMap := make(map[string]database.ChannelAssignment)
+	for _, a := range dbAssignments {
+		dbMap[a.Username] = a
+	}
+
+	for _, lc := range localChannels {
+		if _, ok := dbMap[lc]; !ok {
+			log.Printf("[coordinator] reconciliation: channel %s is running locally but not assigned to this node in DB. Removing.", lc)
+			if err := c.Manager.RemoveChannelForReassignment(lc); err != nil {
+				log.Printf("[coordinator] reconciliation error removing channel %s: %v", lc, err)
+			}
+		}
+	}
+
+	// 2. Start channels that are assigned to this node in DB but not running locally
+	for _, a := range dbAssignments {
+		found := false
+		for _, lc := range localChannels {
+			if lc == a.Username {
+				found = true
+				break
+			}
+		}
+		if !found {
+			log.Printf("[coordinator] reconciliation: channel %s is assigned in DB but not running locally. Starting.", a.Username)
+			if err := c.Manager.CreateChannelFromAssignment(&a); err != nil {
+				log.Printf("[coordinator] reconciliation error starting channel %s: %v", a.Username, err)
+			}
+		}
+	}
+
 	stats, err := c.Client.GetAssignmentStats()
 	if err != nil {
 		log.Printf("[coordinator] claim cycle: get stats error: %v", err)
