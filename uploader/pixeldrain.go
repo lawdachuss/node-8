@@ -32,7 +32,7 @@ type PixelDrainUploader struct {
 func NewPixelDrainUploader(apiKey string) *PixelDrainUploader {
 	return &PixelDrainUploader{
 		apiKey: apiKey,
-		client: newNoProxyClient(5 * time.Minute),
+		client: newDefaultClient(5 * time.Minute),
 	}
 }
 

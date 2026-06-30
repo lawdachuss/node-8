@@ -21,16 +21,7 @@ type LobFileUploader struct {
 func NewLobFileUploader(apiKey string) *LobFileUploader {
 	return &LobFileUploader{
 		apiKey: apiKey,
-		client: &http.Client{
-			Timeout: 10 * time.Minute,
-			Transport: &http.Transport{
-				MaxIdleConns:          10,
-				MaxIdleConnsPerHost:   4,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   15 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			},
-		},
+		client: newDefaultClient(10 * time.Minute),
 	}
 }
 

@@ -22,84 +22,68 @@ type CatboxUploader struct {
 
 // NewCatboxUploader creates a new Catbox.moe uploader.
 // Reads CATBOX_USERHASH from the environment for authenticated uploads.
+// Uses newDefaultClient which routes through ALL_PROXY if set.
 func NewCatboxUploader() *CatboxUploader {
-	transport := &http.Transport{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-
 	return &CatboxUploader{
-		client: &http.Client{
-			Timeout:   5 * time.Minute, // 5 min for larger preview MP4s
-			Transport: transport,
-		},
+		client:   newDefaultClient(5 * time.Minute),
 		userhash: os.Getenv("CATBOX_USERHASH"),
 	}
 }
 
 // Upload uploads a file to Catbox.moe and returns the direct file URL.
-// Retries up to 3 times with exponential backoff (2s, 4s) on transient errors.
+// Retries with MIME type fallback.
 //
 // API: POST https://catbox.moe/user/api.php
 // Fields: reqtype=fileupload, fileToUpload=@file (multipart)
 //         userhash=<hash> (optional, for authenticated uploads)
 // Response on success: plain text URL like "https://files.catbox.moe/abc123.webp"
 // Response on error: plain text error message.
+//
+// Upload strategy (tried in order):
+//   1. Authenticated upload with application/octet-stream (bypasses proxy IP blocks)
+//   2. If 412: authenticated upload with video/mp4 MIME type
+//   3. If still failing: retry up to 3 times with exponential backoff
 func (u *CatboxUploader) Upload(filePath string) (string, error) {
+	mimeTypes := []string{"application/octet-stream", "video/mp4"}
+	useAuth := u.userhash != ""
+
 	var lastErr error
+	for _, mimeType := range mimeTypes {
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(1<<uint(attempt)) * time.Second)
+			}
 
-	for attempt := 0; attempt < 5; attempt++ {
-		if attempt > 0 {
-			backoff := time.Duration(1<<uint(attempt)) * time.Second // 2s, 4s, 8s, 16s
-			time.Sleep(backoff)
+			url, err := u.uploadOnce(filePath, mimeType, useAuth)
+			if err == nil {
+				return url, nil
+			}
+
+			lastErr = err
+			errStr := err.Error()
+
+			// 412 "Invalid uploader" = IP blocked / wrong MIME — try next MIME or fail
+			if strings.Contains(errStr, "412") || strings.Contains(errStr, "Invalid uploader") {
+				break
+			}
+
+			// Non-retryable errors: fail immediately
+			if !isRetryableCatboxError(err) {
+				return "", err
+			}
 		}
-
-		url, err := u.uploadOnce(filePath)
-		if err == nil {
-			return url, nil
-		}
-
-		lastErr = err
-
-		if isRetryableCatboxError(err) {
-			continue
-		}
-
-		return "", err
 	}
 
-	return "", fmt.Errorf("catbox: all %d attempts failed, last: %w", 5, lastErr)
-}
-
-// mimeTypeFor returns an appropriate Content-Type for a file extension.
-// Catbox expects application/octet-stream for most file types.
-func mimeTypeFor(path string) string {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".mp4":
-		return "video/mp4"
-	case ".webm":
-		return "video/webm"
-	case ".webp":
-		return "image/webp"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	default:
-		return "application/octet-stream"
-	}
+	return "", fmt.Errorf("catbox: all strategies failed, last: %w", lastErr)
 }
 
 // uploadOnce streams the file through io.Pipe with a standard multipart writer.
 // This is the canonical Go approach to multipart uploads — it guarantees
 // correct boundary formatting and part ordering that Catbox expects.
-func (u *CatboxUploader) uploadOnce(filePath string) (string, error) {
+//
+// mimeType is the Content-Type for the file part (e.g. "application/octet-stream" or "video/mp4").
+// useAuth controls whether the userhash field is included.
+func (u *CatboxUploader) uploadOnce(filePath string, mimeType string, useAuth bool) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", fmt.Errorf("catbox: open file: %w", err)
@@ -123,8 +107,8 @@ func (u *CatboxUploader) uploadOnce(filePath string) (string, error) {
 			return
 		}
 
-		// Send userhash if available (authenticated uploads are more reliable)
-		if u.userhash != "" {
+		// Send userhash if available and requested (authenticated uploads bypass IP blocks)
+		if useAuth && u.userhash != "" {
 			if err := writer.WriteField("userhash", u.userhash); err != nil {
 				errChan <- fmt.Errorf("write userhash: %w", err)
 				return
@@ -137,7 +121,7 @@ func (u *CatboxUploader) uploadOnce(filePath string) (string, error) {
 		h := make(textproto.MIMEHeader)
 		h.Set("Content-Disposition",
 			fmt.Sprintf(`form-data; name="fileToUpload"; filename="%s"`, filepath.Base(filePath)))
-		h.Set("Content-Type", mimeTypeFor(filePath))
+		h.Set("Content-Type", mimeType)
 		part, err := writer.CreatePart(h)
 		if err != nil {
 			errChan <- fmt.Errorf("create form file: %w", err)

@@ -34,7 +34,7 @@ type pixhostResponse struct {
 func NewThumbnailUploader(apiKey string) *ThumbnailUploader {
 	return &ThumbnailUploader{
 		apiKey: apiKey,
-		client: newNoProxyClient(2 * time.Minute),
+		client: newDefaultClient(2 * time.Minute),
 	}
 }
 

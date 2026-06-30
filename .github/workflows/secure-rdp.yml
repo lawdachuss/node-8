@@ -396,57 +396,76 @@ jobs:
           Copy-Item -Path "$env:GITHUB_WORKSPACE\*" -Destination $repoDir -Recurse -Force
           Write-Host "[OK] Copied local repo to $repoDir"
 
-      - name: Refresh Chaturbate Cookies via Scrapling
+      - name: Refresh Chaturbate Cookies via Go Grabber (through SOCKS5 proxy)
         shell: powershell
         env:
           MINI_ENV: ${{ secrets.env }}
         run: |
           $repoDir = "D:\repos\node-3"
-          if (-not (Test-Path $repoDir)) { Write-Error "Repo not found"; exit 1 }
+          if (-not (Test-Path $repoDir)) { Write-Error "Repo not found at $repoDir"; exit 1 }
+
+          # Write .env from secret so the grabber has the base config
           if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
             [System.IO.File]::WriteAllText("$repoDir\.env", $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Host "[OK] Wrote .env for cookie refresher"
-          }
-          $skipRefresh = $false
-          # Install PySocks so pip can handle ALL_PROXY=socks5:// natively
-          Write-Host "Installing PySocks (needed for pip SOCKS5 support)..."
-          $pysocksWheel = "$env:TEMP\PySocks-1.7.1-py3-none-any.whl"
-          curl.exe --noproxy "*" -sSfL --max-time 30 -o $pysocksWheel "https://files.pythonhosted.org/packages/8d/59/b4572118e098ac8e46e399a1dd0f2d85403ce8bbaad9ec79373ed6badaf9/PySocks-1.7.1-py3-none-any.whl"
-          if ($LASTEXITCODE -eq 0 -and (Test-Path $pysocksWheel)) {
-            pip install --disable-pip-version-check $pysocksWheel
-            Write-Host "[OK] PySocks installed"
+            Write-Host "[OK] Wrote .env from secret"
           } else {
-            Write-Warning "PySocks download failed - pip may have SOCKS issues"
+            Write-Warning "MINI_ENV secret is empty — cookie grabber may have no base config"
           }
-          # ALL_PROXY stays set - but exclude PyPI from proxy (unreliable over SOCKS5)
-          Write-Host "Installing curl_cffi for cookie refresh (lightweight, no browser needed)..."
-          $env:NO_PROXY = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
-          $env:no_proxy = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
-          pip install --default-timeout=60 curl_cffi
-          Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:no_proxy -ErrorAction SilentlyContinue
-          if ($LASTEXITCODE -ne 0) { Write-Warning "curl_cffi install failed, skipping cookie refresh"; $skipRefresh = $true }
-          if (-not $skipRefresh) {
-            Write-Host "Running cookie refresher..."
-            Set-Location $repoDir
-            $refresherLog = "$repoDir\cookie-refresher.log"
-            $refresherErr = "$repoDir\cookie-refresher-err.log"
-            python scripts/cookie_refresher.py 1>$refresherLog 2>$refresherErr
-            $refresherOutput = Get-Content $refresherLog -ErrorAction SilentlyContinue
-            $refresherErrors = Get-Content $refresherErr -ErrorAction SilentlyContinue
-            $refresherOutput | ForEach-Object { Write-Host $_ }
-            if ($refresherErrors) {
-              Write-Host "--- STDERR ---"
-              $refresherErrors | ForEach-Object { Write-Host $_ }
+
+          # Clear COOKIES from .env so the grabber starts fresh (no old cookies)
+          # This forces Cloudflare to issue a new cf_clearance if the proxy IP is clean.
+          $envPath = "$repoDir\.env"
+          if (Test-Path $envPath) {
+            $lines = Get-Content $envPath
+            $newLines = $lines | Where-Object { $_ -notmatch '^COOKIES=' }
+            $newContent = $newLines -join "`r`n"
+            [System.IO.File]::WriteAllText($envPath, $newContent, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host "[OK] Cleared COOKIES from .env — grabbing fresh"
+          }
+
+          Set-Location $repoDir
+
+          # Build the Go cookie grabber
+          Write-Host "Building cookie grabber..."
+          go build -o grab-cookies.exe ./cmd/grab_cookies 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to build cookie grabber"
+            Write-Host "Falling back to old COOKIES from secret — rewriting .env"
+            if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
+              [System.IO.File]::WriteAllText($envPath, $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
             }
-            $uaLine = $refresherOutput | Where-Object { $_ -match '^UA_EXTRACTED=(.+)' }
-            if ($uaLine -and $uaLine -match '^UA_EXTRACTED=(.+)') {
-              $ua = $matches[1]
-              Write-Host "[OK] Extracted User-Agent: $ua"
-              $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-              echo "USER_AGENT=$ua" >> $env:GITHUB_ENV
+            exit 1
+          }
+          Write-Host "[OK] Grabber built"
+
+          # Run the grabber — it reads PROXY_URL/ALL_PROXY from env (set by proxy step),
+          # connects to Chaturbate through the SOCKS5 tunnel, gets fresh cookies,
+          # and writes them to .env.
+          Write-Host "Running cookie grabber through proxy..."
+          Write-Host "  PROXY_URL=$env:PROXY_URL"
+          .\grab-cookies.exe 2>&1
+          $grabExit = $LASTEXITCODE
+
+          Remove-Item .\grab-cookies.exe -Force -ErrorAction SilentlyContinue
+
+          if ($grabExit -ne 0) {
+            Write-Warning "Cookie grabber exited with code $grabExit — falling back to old COOKIES from secret"
+            if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
+              [System.IO.File]::WriteAllText($envPath, $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
             }
-            Write-Host "[OK] Cookie refresh step completed"
+            exit 1
+          }
+
+          # Verify cookies were written
+          $envContent = Get-Content $envPath -Raw -ErrorAction SilentlyContinue
+          if ($envContent -match '^COOKIES=') {
+            Write-Host "[OK] Cookies written to .env"
+          } else {
+            Write-Warning "COOKIES not found in .env after grabber — falling back"
+            if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
+              [System.IO.File]::WriteAllText($envPath, $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
+            }
+            exit 1
           }
 
       - name: Write .env + install deps + create scheduled tasks
@@ -457,10 +476,15 @@ jobs:
           $repoDir = "D:\repos\node-3"
           if (-not (Test-Path $repoDir)) { Write-Error "Repo not found"; exit 1 }
 
+          # Save fresh cookies and user-agent from the grabber step before they get overwritten
+          $freshEnv = Get-Content "$repoDir\.env" -Raw -ErrorAction SilentlyContinue
+          $freshCookies = if ($freshEnv -match '(?m)^COOKIES=.*$') { $matches[0] } else { "" }
+          $freshUA = if ($freshEnv -match '(?m)^USER_AGENT=.*$') { $matches[0] } else { "" }
+
           if ([string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
             Write-Warning "Secret 'env' is empty - skipping .env file"
           } else {
-            # Write .env to repo directory
+            # Write .env to repo directory (may overwrite fresh cookies — restored below)
             [System.IO.File]::WriteAllText("$repoDir\.env", $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
             Write-Host "[OK] Wrote .env file to $repoDir\.env"
             
@@ -472,6 +496,17 @@ jobs:
               Write-Error ".env file was not created"
               exit 1
             }
+          }
+
+          # Restore fresh cookies and user-agent from grabber (don't overwrite with stale secret values)
+          if ($freshCookies -ne "") {
+            $currentContent = Get-Content "$repoDir\.env" -Raw -ErrorAction SilentlyContinue
+            $currentContent = $currentContent -replace '(?m)^COOKIES=.*$', $freshCookies
+            if ($freshUA -ne "") {
+              $currentContent = $currentContent -replace '(?m)^USER_AGENT=.*$', $freshUA
+            }
+            [System.IO.File]::WriteAllText("$repoDir\.env", $currentContent, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host "[OK] Restored fresh cookies from grabber (not using stale secret values)"
           }
 
           Set-Location $repoDir

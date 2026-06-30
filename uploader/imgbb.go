@@ -77,7 +77,7 @@ type ImgBBUploader struct {
 func NewImgBBUploader() *ImgBBUploader {
 	return &ImgBBUploader{
 		keys:   newImgbbKeyRing(),
-		client: newNoProxyClient(60 * time.Second),
+		client: newDefaultClient(60 * time.Second),
 	}
 }
 

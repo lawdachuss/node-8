@@ -2,16 +2,20 @@ package uploader
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // newNoProxyClient returns an http.Client that explicitly bypasses any
@@ -33,6 +37,64 @@ func newNoProxyClient(timeout time.Duration) *http.Client {
 			TLSHandshakeTimeout:   15 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		},
+	}
+}
+
+// newDefaultClient returns an http.Client with proper timeouts and
+// SOCKS5 proxy support via ALL_PROXY env var.
+// When ALL_PROXY is set (e.g. on GitHub Actions nodes), all uploads
+// route through the proxy to avoid datacenter IP blocking.
+// When ALL_PROXY is unset, connects directly (local development).
+//
+// Uses golang.org/x/net/proxy.SOCKS5 at the DialContext level instead of
+// http.Transport.Proxy because Go's built-in SOCKS5 proxy handling
+// (http.ProxyURL with socks5://) has a known issue where DialContext
+// timeouts are ignored for the remote host connection through the proxy
+// (golang/go#37549). By handling SOCKS5 at the dial layer, we enforce
+// a hard 30s deadline on every dial attempt.
+func newDefaultClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	if proxyEnv := os.Getenv("ALL_PROXY"); proxyEnv != "" {
+		if proxyURL, err := url.Parse(proxyEnv); err == nil {
+			socksDialer, err := proxy.SOCKS5("tcp", proxyURL.Host, nil, proxy.Direct)
+			if err == nil {
+				if ctxDialer, ok := socksDialer.(proxy.ContextDialer); ok {
+					directDialer := &net.Dialer{
+						Timeout:   15 * time.Second,
+						KeepAlive: 30 * time.Second,
+					}
+					transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+						dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+						defer cancel()
+						conn, err := ctxDialer.DialContext(dialCtx, network, addr)
+						if err != nil {
+							errStr := err.Error()
+							// Proxy-specific failures — try direct instead
+							if strings.Contains(errStr, "host unreachable") ||
+								strings.Contains(errStr, "connection refused") ||
+								strings.Contains(errStr, "general SOCKS server failure") {
+								return directDialer.DialContext(ctx, network, addr)
+							}
+							return nil, err
+						}
+						return conn, nil
+					}
+				}
+			}
+		}
+	}
+
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
 	}
 }
 
