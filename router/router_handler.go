@@ -1548,3 +1548,62 @@ func RemoveFromPool(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
+
+// PoolCheckRequest is the request body for checking if a channel exists.
+type PoolCheckRequest struct {
+	Site     string `json:"site" form:"site"`
+	Username string `json:"username" form:"username" binding:"required"`
+}
+
+// CheckPoolChannel checks if a channel exists on the given site by querying
+// the site's API. Returns {exists: true/false}. Intended for real-time
+// validation in the pool add form. Uses a no-proxy request — the
+// chatvideocontext GET endpoint does not need the SOCKS5 proxy.
+func CheckPoolChannel(c *gin.Context) {
+	var req PoolCheckRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("bind: %v", err)})
+		return
+	}
+
+	if req.Site == "" {
+		req.Site = "chaturbate"
+	}
+	if req.Username == "" {
+		c.JSON(http.StatusOK, gin.H{"exists": false})
+		return
+	}
+
+	apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, req.Username)
+	if req.Site == "stripchat" {
+		apiURL = fmt.Sprintf("https://stripchat.com/api/front/v2/chat/%s/", req.Username)
+	}
+
+	client := internal.NewNoProxyReq()
+	body, err := client.GetBytes(c.Request.Context(), apiURL)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"exists": false})
+		return
+	}
+
+	// If we got a valid JSON response, the channel exists. Check for age
+	// verification or error pages that indicate non-existence.
+	var result map[string]interface{}
+	if json.Unmarshal(body, &result) != nil {
+		c.JSON(http.StatusOK, gin.H{"exists": false})
+		return
+	}
+
+	// Stripchat returns {"error":"Not found"} for non-existent channels
+	if req.Site == "stripchat" {
+		if errMsg, ok := result["error"].(string); ok && errMsg != "" {
+			c.JSON(http.StatusOK, gin.H{"exists": false})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"exists": true})
+		return
+	}
+
+	// Chaturbate — any valid response means the channel exists
+	c.JSON(http.StatusOK, gin.H{"exists": true})
+}

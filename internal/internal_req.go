@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -69,6 +70,30 @@ func NewReq() *Req {
 	return &Req{
 		client: &http.Client{
 			Transport: sharedTransport(),
+		},
+	}
+}
+
+// NewNoProxyReq creates an HTTP client that bypasses any environment-configured
+// proxy (ALL_PROXY / HTTP_PROXY / HTTPS_PROXY). This is used for liveness checks
+// and other non-streaming requests where the SOCKS5 proxy is not needed.
+// Uses standard Go TLS (no httpcloak fingerprint) since the chatvideocontext
+// GET endpoint does not trigger Cloudflare WAF TCP RST.
+func NewNoProxyReq() *Req {
+	return &Req{
+		client: &http.Client{
+			Transport: &http.Transport{
+				Proxy: nil,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   15 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			},
 		},
 	}
 }

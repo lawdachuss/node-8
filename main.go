@@ -560,7 +560,11 @@ func (l *liveChecker) IsLive(ctx context.Context, siteName, username string) boo
 		siteImpl = site.NewChaturbateSite()
 	}
 
-	status, err := siteImpl.GetRoomStatus(ctx, internal.NewReq(), username)
+	// Use a no-proxy request for liveness checks. The chatvideocontext GET
+	// endpoint does not need the Netherlands SOCKS5 proxy — we're just checking
+	// room status, not fetching HLS streams. Bypassing the proxy means the
+	// liveness check still works when the proxy pool is temporarily empty.
+	status, err := siteImpl.GetRoomStatus(ctx, internal.NewNoProxyReq(), username)
 	if err != nil {
 		return false
 	}

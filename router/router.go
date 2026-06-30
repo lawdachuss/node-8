@@ -111,6 +111,7 @@ func SetupViews(r *gin.Engine) {
 	r.GET("/api/pool", GetPoolJSON)
 	r.POST("/api/pool/add", AddToPool)
 	r.POST("/api/pool/remove", RemoveFromPool)
+	r.POST("/api/pool/check", CheckPoolChannel)
 
 }
 

@@ -138,24 +138,27 @@
         </div>
     </div>
 
-    <div class="add-form">
-        <select id="pool-site">
-            <option value="chaturbate">Chaturbate</option>
-            <option value="stripchat">Stripchat</option>
-        </select>
-        <input type="text" id="pool-username" placeholder="Username" />
-        <select id="pool-resolution">
-            <option value="2160" selected>4K — 2160p</option>
-            <option value="1440">2K — 1440p</option>
-            <option value="1080">FHD — 1080p</option>
-            <option value="720">HD — 720p</option>
-        </select>
-        <select id="pool-framerate">
-            <option value="60" selected>60 FPS</option>
-            <option value="30">30 FPS</option>
-        </select>
-        <button onclick="addToPool()">Add to Pool</button>
-    </div>
+	<div class="add-form">
+		<select id="pool-site">
+			<option value="chaturbate">Chaturbate</option>
+			<option value="stripchat">Stripchat</option>
+		</select>
+		<div style="position:relative;display:inline-flex;align-items:center">
+			<input type="text" id="pool-username" placeholder="Username" oninput="onUsernameInput()" style="padding-right:24px" />
+			<span id="pool-check-indicator" style="position:absolute;right:6px;font-size:14px;line-height:1"></span>
+		</div>
+		<select id="pool-resolution">
+			<option value="2160" selected>4K — 2160p</option>
+			<option value="1440">2K — 1440p</option>
+			<option value="1080">FHD — 1080p</option>
+			<option value="720">HD — 720p</option>
+		</select>
+		<select id="pool-framerate">
+			<option value="60" selected>60 FPS</option>
+			<option value="30">30 FPS</option>
+		</select>
+		<button onclick="addToPool()" id="pool-add-btn">Add to Pool</button>
+	</div>
 
     {{ if .Assignments }}
     <div class="section">
@@ -221,6 +224,33 @@
 </div>
 
 <script>
+var _poolCheckTimer = null;
+
+function onUsernameInput() {
+    if (_poolCheckTimer) clearTimeout(_poolCheckTimer);
+    var indicator = document.getElementById('pool-check-indicator');
+    var username = document.getElementById('pool-username').value.trim();
+    if (!username) {
+        indicator.textContent = '';
+        return;
+    }
+    indicator.textContent = '\u00B7\u00B7\u00B7';
+    _poolCheckTimer = setTimeout(function() {
+        var site = document.getElementById('pool-site').value;
+        fetch('/api/pool/check', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({site: site, username: username})
+        }).then(function(r) {
+            return r.json();
+        }).then(function(data) {
+            indicator.textContent = data.exists ? '\u2713' : '\u2717';
+        }).catch(function() {
+            indicator.textContent = '\u2717';
+        });
+    }, 500);
+}
+
 function addToPool() {
     var site = document.getElementById('pool-site').value;
     var username = document.getElementById('pool-username').value.trim();
