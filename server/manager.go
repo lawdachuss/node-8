@@ -30,5 +30,6 @@ type IManager interface {
 	IsFileUploadInFlight(filePath string) bool
 	SessionInfo() (time.Duration, bool)
 	TriggerSessionStop()
+	StopSession()
 	UploadEntries() *entity.UploadsResponse
 }

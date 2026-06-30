@@ -42,7 +42,7 @@ type Channel struct {
 	StreamedAt   int64
 	Duration     float64 // Seconds
 	Filesize     int     // Bytes
-	Sequence     int
+	Sequence     atomic.Int64
 
 	CompressingCount int32 // atomic: number of active compression goroutines
 
@@ -78,6 +78,7 @@ type Channel struct {
 	pendingWg         sync.WaitGroup // tracks async pending-file processing goroutine
 	UploadWg          sync.WaitGroup // tracks in-flight upload goroutines for graceful shutdown
 	monitorWg         sync.WaitGroup // tracks the Monitor goroutine lifetime
+	pauseWg           sync.WaitGroup // tracks the CheckOnlineWhilePaused goroutine
 	uploadSem         chan struct{}  // per-channel upload semaphore (1 at a time)
 	PipelineQueue     *PipelineQueue // ordered pipeline for thumbnails → upload → metadata → cleanup
 
@@ -378,7 +379,11 @@ func (ch *Channel) Pause() {
 	ctx, cancel := context.WithCancel(context.Background())
 	ch.PauseCancelFunc = cancel
 	ch.cancelMu.Unlock()
-	go ch.CheckOnlineWhilePaused(ctx, 0)
+	ch.pauseWg.Add(1)
+	go func() {
+		defer ch.pauseWg.Done()
+		ch.CheckOnlineWhilePaused(ctx, 0)
+	}()
 }
 
 // Cancel safely calls the channel's CancelFunc under the cancelMu lock.
@@ -395,6 +400,7 @@ func (ch *Channel) Stop() {
 	ch.PauseCancelFunc()
 	ch.cancelMu.Unlock()
 	ch.WaitMonitor()
+	ch.pauseWg.Wait()
 	ch.ProcessPending()
 	ch.Info("channel stopped")
 	ch.Close()

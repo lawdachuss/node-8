@@ -149,8 +149,6 @@ func (ch *Channel) recordStreamCB(ctx context.Context, req *internal.Req, info *
 		return fmt.Errorf("get playlist: %w", err)
 	}
 
-	ch.Resolution = fmt.Sprintf("%dp", playlist.Resolution)
-	ch.Framerate = playlist.Framerate
 	ch.initRecordingState(playlist.AudioPlaylistURL != "")
 
 	if err := ch.NextFile(); err != nil {
@@ -161,6 +159,8 @@ func (ch *Channel) recordStreamCB(ctx context.Context, req *internal.Req, info *
 
 	ch.stateMu.Lock()
 	ch.RoomStatus = site.StatusPublic
+	ch.Resolution = fmt.Sprintf("%dp", playlist.Resolution)
+	ch.Framerate = playlist.Framerate
 	ch.stateMu.Unlock()
 	ch.UpdateOnlineStatus(true)
 
@@ -177,8 +177,6 @@ func (ch *Channel) recordStreamSC(ctx context.Context, req *internal.Req, info *
 	}
 
 	ch.Info("stripchat playlist: url=%s pdkey=%q res=%d", playlist.PlaylistURL, playlist.PDKey, playlist.Resolution)
-	ch.Resolution = fmt.Sprintf("%dp", playlist.Resolution)
-	ch.Framerate = playlist.Framerate
 	ch.initRecordingState(playlist.AudioPlaylistURL != "")
 
 	if err := ch.NextFile(); err != nil {
@@ -189,6 +187,8 @@ func (ch *Channel) recordStreamSC(ctx context.Context, req *internal.Req, info *
 
 	ch.stateMu.Lock()
 	ch.RoomStatus = site.StatusPublic
+	ch.Resolution = fmt.Sprintf("%dp", playlist.Resolution)
+	ch.Framerate = playlist.Framerate
 	ch.stateMu.Unlock()
 	ch.UpdateOnlineStatus(true)
 
@@ -200,7 +200,7 @@ func (ch *Channel) recordStreamSC(ctx context.Context, req *internal.Req, info *
 func (ch *Channel) initRecordingState(hasSeparateAudio bool) {
 	ch.stateMu.Lock()
 	ch.StreamedAt = time.Now().Unix()
-	ch.Sequence = 0
+	ch.Sequence.Store(0)
 	ch.HasSeparateAudio = hasSeparateAudio
 	ch.videoSegmentCount = 0
 	ch.audioSegmentCount = 0
@@ -275,11 +275,10 @@ func (ch *Channel) watchWithGraceCB(ctx context.Context, client *internal.Req, p
 		ch.Info("recording: channel back online — resuming with fresh playlist")
 		ch.stateMu.Lock()
 		ch.RoomStatus = site.StatusPublic
-		ch.stateMu.Unlock()
-		ch.UpdateOnlineStatus(true)
-
 		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
 		ch.Framerate = newPlaylist.Framerate
+		ch.stateMu.Unlock()
+		ch.UpdateOnlineStatus(true)
 
 		loopErr := ch.watchLoopCB(ctx, client, newPlaylist)
 		if loopErr == nil {
@@ -313,10 +312,10 @@ func (ch *Channel) watchLoopCB(ctx context.Context, client *internal.Req, p *cha
 			return apiErr
 		}
 		p = newPlaylist
-		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
-		ch.Framerate = newPlaylist.Framerate
 		ch.stateMu.Lock()
 		ch.RoomStatus = site.StatusPublic
+		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
+		ch.Framerate = newPlaylist.Framerate
 		ch.stateMu.Unlock()
 		ch.UpdateOnlineStatus(true)
 	}
@@ -394,11 +393,10 @@ func (ch *Channel) watchWithGraceSC(ctx context.Context, client *internal.Req, p
 		ch.Info("recording: channel back online — resuming with fresh playlist")
 		ch.stateMu.Lock()
 		ch.RoomStatus = site.StatusPublic
-		ch.stateMu.Unlock()
-		ch.UpdateOnlineStatus(true)
-
 		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
 		ch.Framerate = newPlaylist.Framerate
+		ch.stateMu.Unlock()
+		ch.UpdateOnlineStatus(true)
 
 		loopErr := ch.watchLoopSC(ctx, client, newPlaylist)
 		if loopErr == nil {
@@ -447,10 +445,10 @@ func (ch *Channel) watchLoopSC(ctx context.Context, client *internal.Req, p *str
 			}
 		}
 		p = newPlaylist
-		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
-		ch.Framerate = newPlaylist.Framerate
 		ch.stateMu.Lock()
 		ch.RoomStatus = site.StatusPublic
+		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
+		ch.Framerate = newPlaylist.Framerate
 		ch.stateMu.Unlock()
 		ch.UpdateOnlineStatus(true)
 	}

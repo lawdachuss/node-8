@@ -435,6 +435,7 @@ func start(c *cli.Context) error {
 			coord.StartDraining()
 		}
 
+		server.Manager.StopSession()
 		server.Manager.StopAllChannels()
 		server.Manager.StopWatcher()
 		fmt.Println("[SHUTDOWN] all channels stopped - waiting for mux/thumbnail/upload/Supabase to finish...")

@@ -2,9 +2,11 @@ package server
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -58,7 +60,8 @@ func detectNodeID() string {
 	if host, err := os.Hostname(); err == nil && host != "" {
 		return host
 	}
-	return fmt.Sprintf("node-%x", time.Now().UnixNano())
+	n, _ := rand.Int(rand.Reader, big.NewInt(1<<48))
+	return fmt.Sprintf("node-%x", n)
 }
 
 // NodeID returns the current node's unique identifier.
@@ -473,13 +476,14 @@ func SaveRecordingsToDB(data []byte) error {
 				}
 			}
 
-			if rec.ThumbnailURL != "" || rec.SpriteURL != "" {
-				img := &database.PreviewImage{
-					RecordingID:  savedRec.ID,
-					Filename:     rec.Filename,
-					ThumbnailURL: rec.ThumbnailURL,
-					SpriteURL:    rec.SpriteURL,
-				}
+		if rec.ThumbnailURL != "" || rec.SpriteURL != "" || rec.PreviewURL != "" {
+			img := &database.PreviewImage{
+				RecordingID:  savedRec.ID,
+				Filename:     rec.Filename,
+				ThumbnailURL: rec.ThumbnailURL,
+				SpriteURL:    rec.SpriteURL,
+				PreviewURL:   rec.PreviewURL,
+			}
 				if err := client.SavePreviewImage(img); err != nil {
 					return fmt.Errorf("save preview image %s: %w", rec.Filename, err)
 				}

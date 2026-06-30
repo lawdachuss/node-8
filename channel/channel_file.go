@@ -73,7 +73,7 @@ func (ch *Channel) NextFile() error {
 	}
 
 	// Increment the sequence number for the next file
-	ch.Sequence++
+	ch.Sequence.Add(1)
 	return nil
 }
 
@@ -513,7 +513,7 @@ func (ch *Channel) GenerateFilename() (string, error) {
 	t := time.Unix(ch.StreamedAt, 0)
 	pattern := &Pattern{
 		Username: ch.Config.Username,
-		Sequence: ch.Sequence,
+		Sequence: int(ch.Sequence.Load()),
 		Year:     t.Format("2006"),
 		Month:    t.Format("01"),
 		Day:      t.Format("02"),
@@ -1122,10 +1122,14 @@ func UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL string) bool {
 		return false
 	}
 
-	UploadSem <- struct{}{}
-	defer func() { <-UploadSem }()
-
 	filename := filepath.Base(filePath)
+	select {
+	case UploadSem <- struct{}{}:
+	case <-time.After(30 * time.Second):
+		recoveryLogf(filename, "upload semaphore timeout for %s — skipping", filename)
+		return false
+	}
+	defer func() { <-UploadSem }()
 
 	recoveryLogf(filename, "uploading %s", filename)
 

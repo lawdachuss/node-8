@@ -727,7 +727,13 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			UploadSem <- struct{}{}
+			select {
+			case UploadSem <- struct{}{}:
+			case <-time.After(30 * time.Second):
+				ch.Warn("pipeline: upload slot unavailable for %s after 30s — skipping upload", filename)
+				uploadErr = fmt.Errorf("upload semaphore timeout")
+				return
+			}
 			defer func() { <-UploadSem }()
 			defer func() {
 				if r := recover(); r != nil {
@@ -886,6 +892,12 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 	framerate := p.Framerate
 	pq.ch.stateMu.Unlock()
 
+	// Persist initial state for crash recovery (best-effort) while we
+	// still hold pq.mu, before the worker can race on p's fields.
+	if hErr := server.SavePipelineState(p.toDBState()); hErr != nil {
+		pq.ch.Warn("pipeline: could not persist initial state for %s: %v", p.Filename, hErr)
+	}
+
 	pq.pipelines = append(pq.pipelines, p)
 	pq.mu.Unlock()
 	pq.cond.Signal()
@@ -920,10 +932,6 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 		}
 	}()
 
-	// Persist initial state for crash recovery (best-effort).
-	if hErr := server.SavePipelineState(p.toDBState()); hErr != nil {
-		pq.ch.Warn("pipeline: could not persist initial state for %s: %v", p.Filename, hErr)
-	}
 }
 
 // ResumePending loads incomplete pipelines from Supabase and re-queues them.

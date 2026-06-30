@@ -26,7 +26,11 @@ func cacheGet(key string) []byte {
 	}
 	if time.Now().After(item.expiresAt) {
 		cacheMu.Lock()
-		delete(cache, key)
+		// Re-check after acquiring write lock — another goroutine may have
+		// inserted a fresh entry between our RUnlock and Lock.
+		if item2, ok2 := cache[key]; ok2 && time.Now().After(item2.expiresAt) {
+			delete(cache, key)
+		}
 		cacheMu.Unlock()
 		return nil
 	}
