@@ -37,16 +37,16 @@ type videoEncoder struct {
 
 // availableEncoders lists GPU encoders in priority order, with CPU fallback last
 var availableEncoders = []videoEncoder{
-	// NVIDIA NVENC - use higher cq value for better compression (scale is 0-51, higher = smaller file)
-	{"NVENC", "h264_nvenc", []string{"-preset", "p4", "-rc", "vbr", "-cq", "30", "-b:v", "0"}},
+	// NVIDIA NVENC (CQ 0-51, lower = better quality; 23 ≈ visually lossless)
+	{"NVENC", "h264_nvenc", []string{"-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0"}},
 	// AMD AMF
-	{"AMF", "h264_amf", []string{"-quality", "balanced", "-rc", "vbr_latency", "-qp_i", "28", "-qp_p", "28"}},
+	{"AMF", "h264_amf", []string{"-quality", "balanced", "-rc", "vbr_latency", "-qp_i", "22", "-qp_p", "22"}},
 	// Intel Quick Sync
-	{"QSV", "h264_qsv", []string{"-preset", "medium", "-global_quality", "28"}},
+	{"QSV", "h264_qsv", []string{"-preset", "medium", "-global_quality", "22"}},
 	// macOS VideoToolbox
-	{"VideoToolbox", "h264_videotoolbox", []string{"-q:v", "65"}},
-	// CPU fallback
-	{"CPU", "libx264", []string{"-preset", "medium", "-crf", "23"}},
+	{"VideoToolbox", "h264_videotoolbox", []string{"-q:v", "55"}},
+	// CPU fallback (CRF 18 = visually lossless)
+	{"CPU", "libx264", []string{"-preset", "medium", "-crf", "18"}},
 }
 
 // detectEncoder finds the best available encoder
