@@ -118,6 +118,9 @@ func fetchAPIResponse(ctx context.Context, client *internal.Req, username string
 			if errors.Is(e, internal.ErrPasswordRequired) {
 				return retry.Unrecoverable(e)
 			}
+			if errors.Is(e, internal.ErrPrivateStream) {
+				return retry.Unrecoverable(e)
+			}
 			return e
 		}
 		if body == "" {
