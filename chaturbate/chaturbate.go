@@ -168,6 +168,24 @@ func fetchStream(ctx context.Context, client *internal.Req, username string, roo
 		if errors.Is(err, internal.ErrPasswordRequired) {
 			return nil, StatusPrivate, internal.ErrPasswordRequired
 		}
+		// POST failed — retry with backoff before falling back to GET.
+		// The GET endpoint (chatvideocontext) often returns 403 when cookies
+		// or proxy don't match, wasting ~30s on 10 retries. Retrying POST
+		// is faster since transient issues (rate limit, CSRF) may clear.
+		for retry := 0; retry < 3; retry++ {
+			select {
+			case <-ctx.Done():
+				return nil, "", ctx.Err()
+			case <-time.After(time.Duration(retry+2) * time.Second):
+			}
+			body, err = internal.PostChaturbateAPI(ctx, username)
+			if err == nil {
+				goto postSucceeded
+			}
+			if errors.Is(err, internal.ErrPasswordRequired) {
+				return nil, StatusPrivate, internal.ErrPasswordRequired
+			}
+		}
 		// Try the GET API as fallback
 		resp, apiErr := fetchAPIResponse(ctx, client, username)
 		if apiErr != nil {
@@ -208,6 +226,8 @@ func fetchStream(ctx context.Context, client *internal.Req, username string, roo
 
 		return &Stream{HLSSource: workingURL}, resp.RoomStatus, nil
 	}
+
+postSucceeded:
 
 	// Parse POST API response
 	var resp APIResponse
