@@ -37,6 +37,15 @@ var (
 	cacheTTL      = 5 * time.Minute
 )
 
+// ResetCache clears the proxy cache so the next call to FetchProxies
+// fetches fresh proxies from all sources instead of returning stale ones.
+func ResetCache() {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	cacheTime = time.Time{}
+	cachedProxies = nil
+}
+
 // FetchProxies fetches SOCKS5 proxies from public lists, tests them
 // concurrently using httpcloak (Chrome 146), and returns as soon as
 // `limit` working proxies are found (or all are exhausted).

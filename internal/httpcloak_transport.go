@@ -153,18 +153,16 @@ func (t *httpcloakTransport) refreshProxies() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	newProxies := configuredProxyURLs()
+	// Always try dynamic discovery first when refreshing after failures.
+	// Clear the stale cache so we get fresh proxies from public lists.
+	fmt.Println("[proxy] all proxies failed — attempting dynamic discovery...")
+	proxy.ResetCache()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	results, err := proxy.FetchProxies(ctx, 5)
 
-	// If env has no proxies, try dynamic discovery
-	if len(newProxies) == 0 {
-		fmt.Println("[proxy] no env-configured proxies — attempting dynamic discovery...")
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		results, err := proxy.FetchProxies(ctx, 5)
-		if err != nil || len(results) == 0 {
-			fmt.Printf("[proxy] dynamic discovery failed: %v\n", err)
-			return false
-		}
+	var newProxies []string
+	if err == nil {
 		for _, r := range results {
 			if r.OK {
 				newProxies = append(newProxies, r.URL)
@@ -173,8 +171,18 @@ func (t *httpcloakTransport) refreshProxies() bool {
 		fmt.Printf("[proxy] dynamically discovered %d proxies\n", len(newProxies))
 	}
 
+	// If dynamic discovery found nothing, fall back to configured proxies
 	if len(newProxies) == 0 {
-		return false
+		newProxies = configuredProxyURLs()
+		if len(newProxies) == 0 {
+			if err != nil {
+				fmt.Printf("[proxy] dynamic discovery failed: %v\n", err)
+			} else {
+				fmt.Println("[proxy] dynamic discovery returned no working proxies")
+			}
+			return false
+		}
+		fmt.Printf("[proxy] falling back to %d env-configured proxies\n", len(newProxies))
 	}
 
 	// Close old client if it exposes a Close method
