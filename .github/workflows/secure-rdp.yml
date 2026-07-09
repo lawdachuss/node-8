@@ -1,10 +1,15 @@
 name: Secure RDP
-run-name: Secure RDP${{ github.event.client_payload.triggered_by == 'workflow-watchman' && ' (watchman)' || '' }}
+run-name: Secure RDP${{ github.event.inputs.triggered_by == 'workflow-watchman' && ' (watchman)' || '' }}
 
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
+    inputs:
+      triggered_by:
+        description: 'Source of the trigger'
+        required: false
+        default: ''
 
 permissions:
   contents: read
