@@ -33,282 +33,134 @@ jobs:
           $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           echo "START_TIME=$epoch" >> $env:GITHUB_ENV
           Write-Host "Workflow started at Unix epoch: $epoch"
-          
+
           $currentRunId = "$env:GITHUB_RUN_ID"
-          if ([string]::IsNullOrEmpty($currentRunId)) {
-            Write-Host "Local testing or missing run ID. Skipping check."
-            exit 0
-          }
-          
-          # Fetch recent runs of the same workflow
+          if ([string]::IsNullOrEmpty($currentRunId)) { exit 0 }
+
           $runsJson = gh run list --workflow secure-rdp.yml --repo "$env:GITHUB_REPOSITORY" --limit 10 --json databaseId,status,conclusion,startedAt
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Failed to fetch run list from GitHub API. Proceeding..."
-            exit 0
-          }
-          
+          if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to list runs. Proceeding..."; exit 0 }
+
           $runs = $runsJson | ConvertFrom-Json
-          $hasActiveOverlap = $false
-          
           foreach ($run in $runs) {
             if ($run.databaseId -ne $currentRunId -and $run.status -eq 'in_progress' -and ($null -eq $run.conclusion -or $run.conclusion -eq '')) {
-              $startedAt = [DateTime]::Parse($run.startedAt).ToUniversalTime()
-              $now = [DateTime]::UtcNow
-              $elapsedMinutes = ($now - $startedAt).TotalMinutes
-              
-              Write-Host "Found other active run: ID=$($run.databaseId), StartedAt=$startedAt ($elapsedMinutes minutes ago)"
-              
-              if ($elapsedMinutes -lt 348) {
-                $hasActiveOverlap = $true
-                break
-              }
-            } else {
-              if ($run.databaseId -ne $currentRunId) {
-                Write-Host "Skipping run ID=$($run.databaseId) (status=$($run.status), conclusion=$($run.conclusion))"
+              $elapsed = ([DateTime]::UtcNow - [DateTime]::Parse($run.startedAt).ToUniversalTime()).TotalMinutes
+              if ($elapsed -lt 348) {
+                Write-Host "Another active run found (ID=$($run.databaseId), $([math]::Round($elapsed))m old). Cancelling this one."
+                gh run cancel $currentRunId --repo "$env:GITHUB_REPOSITORY"
+                Start-Sleep -Seconds 60; exit 1
               }
             }
           }
-          
-          if ($hasActiveOverlap) {
-            Write-Host "Another active workflow run was started recently (less than 5 hours and 55 minutes ago)."
-            Write-Host "Cancelling this run to enforce timing rules and prevent overlap..."
-            gh run cancel $currentRunId --repo "$env:GITHUB_REPOSITORY"
-            Start-Sleep -Seconds 60
-            exit 1
-          } else {
-            Write-Host "Timing check passed. No overlapping active runs found."
-          }
+          Write-Host "Timing check passed."
+
+      - name: Cache Setup
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: |
+            ~\go\pkg\mod
+            ~\AppData\Local\pip\Cache
+            ~\.cache\ms-playwright
+            D:\repos\node-3\cloudflared.exe
+          key: ${{ runner.os }}-setup-${{ hashFiles('go.sum', 'cmd/grab_cookies/**') }}
+          restore-keys: ${{ runner.os }}-setup-
 
       - name: Connect Netherlands Proxy (SOCKS5)
         shell: powershell
         run: |
           function log { param($m) Write-Host $m; [System.Console]::Out.Flush() }
 
-          function Fetch-Proxies($url) {
-            try {
-              $raw = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 15 -ErrorAction Stop
-              $list = @()
-              foreach ($line in ($raw -split "`n")) {
-                $t = $line.Trim()
-                if ($t -eq "" -or $t -match '^#') { continue }
-                if ($t -match '^socks5://') { $list += $t }
-                elseif ($t -match '^(\d+\.\d+\.\d+\.\d+):(\d+)$') { $list += "socks5://$t" }
-              }
-              return $list
-            } catch { return @() }
-          }
-
-          # -- If a PROXY_URLS secret is set, use it directly and skip discovery --
+          # If PROXY_URLS secret is set, use it directly
           $secretProxy = "${{ secrets.PROXY_URLS }}"
           if (-not [string]::IsNullOrWhiteSpace($secretProxy)) {
-            log "=== Using pre-configured PROXY_URLS secret ==="
             $secretList = @($secretProxy -split '[,\s]+' | Where-Object { $_ -match '^socks5://' })
             if ($secretList.Count -gt 0) {
               $primary = $secretList[0]
               echo "PROXY_URL=$($secretList -join ',')" >> $env:GITHUB_ENV
-              echo "ALL_PROXY=$primary" >> $env:GITHUB_ENV
-              echo "all_proxy=$primary" >> $env:GITHUB_ENV
+              echo "ALL_PROXY=$primary" >> $env:GITHUB_ENV; echo "all_proxy=$primary" >> $env:GITHUB_ENV
               echo "SOCKS_PROXY=$primary" >> $env:GITHUB_ENV
-              & git config --global http.proxy $primary
-              & git config --global https.proxy $primary
-              try {
-                $ip  = curl.exe -x $primary -s -m 10 https://api.ipify.org 2>$null
-                $loc = curl.exe -x $primary -s -m 10 https://ipinfo.io/json 2>$null | ConvertFrom-Json
-                log "Public IP: $ip / $($loc.country) - $($loc.org)"
-              } catch { log "Verification skipped: $_" }
-              $LASTEXITCODE = 0; log "[OK] SOCKS5 proxy configured from secret."; exit 0
+              & git config --global http.proxy $primary; & git config --global https.proxy $primary
+              try { $ip = curl.exe -x $primary -s -m 10 https://api.ipify.org 2>$null; log "Public IP: $ip" } catch {}
+              log "[OK] SOCKS5 proxy configured from secret."; exit 0
             }
           }
 
-          log "=== Fetching live SOCKS5 proxies ==="
+          log "=== Fetching SOCKS5 proxies (parallel) ==="
+          $sources = @(
+            "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=nl&timeout=5000"
+            "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=in&timeout=5000"
+            "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=de&timeout=5000"
+            "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
+            "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
+            "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/nl/socks5/data.txt"
+          )
+
+          # Fetch all sources in parallel
+          $fetchBlock = { param($url) try { $raw = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 15 -ErrorAction Stop; return $raw -split "`n" } catch { return @() } }
+          $jobs = $sources | ForEach-Object { Start-Job -ScriptBlock $fetchBlock -ArgumentList $_ }
+          $null = $jobs | Wait-Job -Timeout 30 -ErrorAction SilentlyContinue
           $allProxies = @()
+          foreach ($j in $jobs) { $allProxies += Receive-Job $j -ErrorAction SilentlyContinue; Remove-Job $j -Force -ErrorAction SilentlyContinue }
 
-          # NL-specific (highest priority)
-          log "Fetching NL proxies..."
-          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=nl&timeout=5000"
-          log "  NL so far: $($allProxies.Count)"
-
-          # IN-specific
-          log "Fetching IN proxies..."
-          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=in&timeout=5000"
-          log "  NL+IN so far: $($allProxies.Count)"
-
-          # DE-specific (geographically close to NL)
-          log "Fetching DE proxies..."
-          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=de&timeout=5000"
-
-          # Broad community lists
-          $allProxies += Fetch-Proxies "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
-          $allProxies += Fetch-Proxies "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
-          $allProxies += Fetch-Proxies "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/nl/socks5/data.txt"
-
-          $allProxies = ($allProxies | Select-Object -Unique | Sort-Object { Get-Random }) | Select-Object -First 120
-          log "Total unique proxies to test (capped at 120): $($allProxies.Count)"
+          $allProxies = ($allProxies | ForEach-Object {
+            $t = $_.Trim(); if ($t -match '^socks5://') { $t } elseif ($t -match '^(\d+\.\d+\.\d+\.\d+):(\d+)$') { "socks5://$t" }
+          } | Where-Object { $_ -ne $null } | Select-Object -Unique | Sort-Object { Get-Random }) | Select-Object -First 120
+          log "Fetched $($allProxies.Count) unique proxies"
 
           if ($allProxies.Count -eq 0) {
-            log "WARNING: No proxies fetched. Using emergency fallback list."
-            $allProxies = @(
-              "socks5://5.255.117.250:1080",
-              "socks5://185.233.184.165:1080",
-              "socks5://5.255.113.177:1080",
-              "socks5://103.139.106.174:1080",
-              "socks5://103.139.106.200:1080"
-            )
+            $allProxies = @("socks5://5.255.117.250:1080","socks5://185.233.184.165:1080","socks5://5.255.113.177:1080","socks5://103.139.106.174:1080","socks5://103.139.106.200:1080")
           }
 
-          log ""
-          log "=== Phase 1: Liveness test (batches of 10, 30s timeout per batch) ==="
-          # Only check if proxy is alive (returns an IP) -- fast, parallel
-          # The critical fix: Wait-Job -Timeout 30 (was 5, which killed jobs before curl could finish)
-          $aliveTestBlock = {
-            param($proxyUrl)
-            try {
-              $ip = curl.exe -x $proxyUrl -s --connect-timeout 3 -m 6 https://api.ipify.org 2>$null
-              if ($ip -match '^\d+\.\d+\.\d+\.\d+$') {
-                return @{ url = $proxyUrl; ip = $ip.Trim() }
-              }
-            } catch {}
-            return $null
+          # Phase 1: Liveness test (parallel batches of 20, 30s timeout)
+          log "=== Phase 1: Liveness test ==="
+          $aliveBlock = { param($u) try { $ip = curl.exe -x $u -s --connect-timeout 3 -m 6 https://api.ipify.org 2>$null; if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { return @{url=$u; ip=$ip.Trim()} } } catch {}; return $null }
+          $alive = [System.Collections.ArrayList]@()
+          for ($i = 0; $i -lt $allProxies.Count; $i += 20) {
+            $batch = $allProxies[$i..([math]::Min($i+19, $allProxies.Count-1))]
+            $jbs = $batch | ForEach-Object { Start-Job -ScriptBlock $aliveBlock -ArgumentList $_ }
+            $null = $jbs | Wait-Job -Timeout 30 -ErrorAction SilentlyContinue
+            foreach ($j in $jbs) { $r = Receive-Job $j -ErrorAction SilentlyContinue; if ($r -and $r.url) { [void]$alive.Add($r) }; Remove-Job $j -Force -ErrorAction SilentlyContinue }
+            if ($alive.Count -ge 30) { break }
+          }
+          log "  Alive: $($alive.Count) proxies"
+
+          # Phase 2: Chaturbate reachability (parallel)
+          log "=== Phase 2: Chaturbate test ==="
+          $cbBlock = { param($w) try { $out = curl.exe -x $w.url -s -o NUL -w "%{http_code} %{url_effective}" -L --connect-timeout 3 -m 8 https://chaturbate.com 2>$null; $parts = $out -split ' ', 2; return @{url=$w.url; ip=$w.ip; code=[int]$parts[0]; finalUrl=if($parts.Count -gt 1){$parts[1]}else{''}} } catch { return $null } }
+          $cbJobs = $alive | ForEach-Object { Start-Job -ScriptBlock $cbBlock -ArgumentList $_ }
+          $null = $cbJobs | Wait-Job -Timeout 30 -ErrorAction SilentlyContinue
+          $clean = [System.Collections.ArrayList]@()
+          foreach ($j in $cbJobs) {
+            $r = Receive-Job $j -ErrorAction SilentlyContinue
+            if ($r -and $r.code -eq 200 -and $r.finalUrl -notmatch '(?i)(verify|auth|captcha|face|human|robot)') { [void]$clean.Add($r) }
+            Remove-Job $j -Force -ErrorAction SilentlyContinue
+          }
+          log "  Chaturbate-OK: $($clean.Count) proxies"
+
+          if ($clean.Count -eq 0) {
+            # Fallback: use alive proxies even without CB check
+            $clean = $alive | Select-Object -First 3
+            log "  No CB-clean proxies, falling back to $($clean.Count) alive proxies"
           }
 
-          $aliveProxies = [System.Collections.ArrayList]@()
-          for ($i = 0; $i -lt $allProxies.Count; $i += 10) {
-            $batch = $allProxies[$i..([math]::Min($i+9, $allProxies.Count-1))]
-            $jobs  = @($batch | ForEach-Object { Start-Job -ScriptBlock $aliveTestBlock -ArgumentList $_ })
-            $null  = $jobs | Wait-Job -Timeout 30 -ErrorAction SilentlyContinue
-            foreach ($j in $jobs) {
-              $r = Receive-Job $j -ErrorAction SilentlyContinue
-              if ($r -and $r.url) { [void]$aliveProxies.Add($r) }
-              Remove-Job $j -Force -ErrorAction SilentlyContinue
-            }
-            log "  Batch $([math]::Floor($i/10)+1): $($aliveProxies.Count) alive so far"
-            if ($aliveProxies.Count -ge 20) { log "  Enough candidates, stopping early."; break }
-          }
-          log "  Phase 1 done: $($aliveProxies.Count) alive proxies found"
-
-          log ""
-          log "=== Phase 2: Chaturbate reachability + geo-lookup ==="
-          $cleanProxies  = [System.Collections.ArrayList]@()
-          $blockedProxies= [System.Collections.ArrayList]@()
-
-          foreach ($w in $aliveProxies) {
-            $cbOut       = curl.exe -x $w.url -s -o NUL -w "%{http_code} %{url_effective}" -L --connect-timeout 3 -m 8 https://chaturbate.com 2>$null
-            $parts       = $cbOut -split ' ', 2
-            $cbCode      = $parts[0]
-            $cbFinalUrl  = if ($parts.Count -gt 1) { $parts[1] } else { "" }
-            $faceId      = ($cbFinalUrl -match '(?i)(verify|auth|captcha|face|human|robot)')
-            $cbOk        = ($cbCode -eq "200")
-
-            # Geo-lookup directly (no extra proxy hop needed -- IP is already known)
-            $country = ""; $org = ""
-            try {
-              $locRaw = curl.exe -s --connect-timeout 3 -m 5 "http://ip-api.com/json/$($w.ip)?fields=countryCode,org" 2>$null
-              if ($locRaw) {
-                $loc = $locRaw | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if ($loc -and $loc.countryCode) { $country = $loc.countryCode; $org = $loc.org }
-              }
-            } catch {}
-
-            $entry = @{ url=$w.url; ip=$w.ip; country=$country; org=$org; faceIdBlocked=$faceId; cbReachable=$cbOk }
-            log "  [$country] $($w.ip) cb=$cbOk faceID=$faceId  $($w.url)"
-
-            if ($cbOk -and -not $faceId)  { [void]$cleanProxies.Add($entry) }
-            elseif ($cbOk)               { [void]$blockedProxies.Add($entry) }
-          }
-          log "  Clean: $($cleanProxies.Count), Face-ID blocked: $($blockedProxies.Count)"
-
-          # -- Pick best proxies (prefer NL/IN/DE, then any) ------------------
-          $preferredCountries = @("NL","IN","DE")
-          $workingProxies = @()
-
-          # Pass 1: clean proxies in preferred countries
-          foreach ($w in ($cleanProxies | Sort-Object { if ($_.country -in $preferredCountries) { 0 } else { 1 } })) {
-            if ($workingProxies.Count -ge 5) { break }
-            $workingProxies += $w
-            log "CLEAN #$($workingProxies.Count): $($w.url) [$($w.country)] IP=$($w.ip)"
-          }
-          # Pass 2: face-ID blocked if still 0
-          if ($workingProxies.Count -eq 0) {
-            foreach ($w in ($blockedProxies | Sort-Object { if ($_.country -in $preferredCountries) { 0 } else { 1 } })) {
-              if ($workingProxies.Count -ge 3) { break }
-              $workingProxies += $w
-              log "FACE-ID #$($workingProxies.Count): $($w.url) [$($w.country)] IP=$($w.ip)"
-            }
-          }
-          # Pass 3: any alive proxy (skip CB check entirely)
-          if ($workingProxies.Count -eq 0) {
-            foreach ($w in $aliveProxies) {
-              if ($workingProxies.Count -ge 1) { break }
-              $workingProxies += $w
-              log "ALIVE-FALLBACK #1: $($w.url) IP=$($w.ip)"
-            }
-          }
-
-          if ($workingProxies.Count -eq 0) {
-            Write-Error "No working SOCKS5 proxy found after testing all sources."
-            log ""
-            log "TROUBLESHOOTING:"
-            log "1. GitHub Actions runners are in US/VA -- Chaturbate often requires NL or IN IP"
-            log "2. Free proxy lists rotate rapidly; most are dead within hours"
-            log "3. FIX: Set a PROXY_URLS secret with your own working SOCKS5 proxy:"
-            log "   e.g. PROXY_URLS=socks5://user:pass@your-proxy.com:1080"
-            log "   Get free proxies: https://www.webshare.io/ (10 free)"
-            exit 1
-          }
-
-          log ""
-          if ($workingProxies.Count -gt 0) {
-            log "=== Collected $($workingProxies.Count) working proxies ==="
-            $primary = $workingProxies[0].url
-            $proxyUrlList = ($workingProxies | ForEach-Object { $_.url }) -join ","
-
-            echo "PROXY_URL=$proxyUrlList" >> $env:GITHUB_ENV
-            echo "ALL_PROXY=$primary"     >> $env:GITHUB_ENV
-            echo "all_proxy=$primary"     >> $env:GITHUB_ENV
-            echo "SOCKS_PROXY=$primary"   >> $env:GITHUB_ENV
-
-            & git config --global http.proxy  $primary
-            & git config --global https.proxy $primary
-
-            log "[OK] Git configured to use $primary"
-            log "[OK] PROXY_URL set with $($workingProxies.Count) proxies for rotation"
-            foreach ($wp in $workingProxies) {
-              log "  [$($wp.country)] $($wp.url) (IP: $($wp.ip) - $($wp.org))"
-            }
-
-            log ""
-            log "Verifying primary proxy egress..."
-            try {
-              $ip  = curl.exe -x $primary -s -m 10 https://api.ipify.org 2>$null
-              $LASTEXITCODE = 0
-              $loc = curl.exe -x $primary -s -m 10 https://ipinfo.io/json 2>$null | ConvertFrom-Json
-              $LASTEXITCODE = 0
-              log "Public IP: $ip / $($loc.country) - $($loc.org)"
-            } catch { log "Verification failed: $_" }
-            $LASTEXITCODE = 0
-            log "[OK] SOCKS5 proxy configured."
-          } else {
-            log "=== No proxies configured - DVR will connect directly ==="
-          }
+          $working = $clean | Select-Object -First 5
+          $primary = $working[0].url
+          $proxyUrlList = ($working | ForEach-Object { $_.url }) -join ","
+          echo "PROXY_URL=$proxyUrlList" >> $env:GITHUB_ENV
+          echo "ALL_PROXY=$primary" >> $env:GITHUB_ENV; echo "all_proxy=$primary" >> $env:GITHUB_ENV
+          echo "SOCKS_PROXY=$primary" >> $env:GITHUB_ENV
+          & git config --global http.proxy $primary; & git config --global https.proxy $primary
+          log "[OK] $($working.Count) proxies: $proxyUrlList"
 
       - name: Configure Windows RDP
         shell: powershell
         run: |
-          Write-Host "Configuring RDP..."
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fSingleSessionPerUser" -Value 0 -Force
-
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' fDenyTSConnections 0 -Force
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' UserAuthentication 0 -Force
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' fSingleSessionPerUser 0 -Force
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue
-          Stop-Service -Name mpssvc -Force -ErrorAction SilentlyContinue
-          Set-Service -Name mpssvc -StartupType Disabled -ErrorAction SilentlyContinue
-
-          Restart-Service TermService -Force
-          Start-Sleep -Seconds 5
-
-          Write-Host "[OK] RDP configured and listening on port 3389"
+          Stop-Service mpssvc -Force -ErrorAction SilentlyContinue; Set-Service mpssvc -StartupType Disabled -ErrorAction SilentlyContinue
+          Restart-Service TermService -Force; Start-Sleep -Seconds 3
 
       - name: Create RDP User
         shell: powershell
@@ -316,718 +168,237 @@ jobs:
           $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
           $password = -join ((1..20) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) { Remove-LocalUser -Name "RDP" }
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          if (Get-LocalUser "RDP" -ErrorAction SilentlyContinue) { Remove-LocalUser "RDP" }
+          New-LocalUser "RDP" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-          Write-Host "[OK] RDP user created"
 
-      - name: Install Tailscale
+      - name: Install Tailscale & FFmpeg (parallel)
         shell: powershell
         run: |
-          Write-Host "Installing Tailscale..."
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /qn /norestart" -Wait
-          Remove-Item $installer -Force
-          Write-Host "[OK] Tailscale installed"
-
-      - name: Install FFmpeg
-        shell: powershell
-        run: |
-          # Bypass SOCKS5 proxy for Chocolatey - it needs direct HTTPS access
-          $savedAllProxy = $env:ALL_PROXY
-          $savedHttpProxy = $env:HTTP_PROXY
-          $savedHttpsProxy = $env:HTTPS_PROXY
-          Remove-Item Env:ALL_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:all_proxy -ErrorAction SilentlyContinue
-          Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:http_proxy -ErrorAction SilentlyContinue
-          Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
-          $env:NO_PROXY = "community.chocolatey.org,chocolatey.org"
-          Write-Host "Installing FFmpeg via Chocolatey..."
-          choco install ffmpeg -y --no-progress
-          Write-Host "[OK] FFmpeg installed"
-          refreshenv
-          $ffver = & ffmpeg.exe -version 2>&1
-          Write-Host "Version: $($ffver | Select-Object -First 1)"
-          if ($savedAllProxy) { $env:ALL_PROXY = $savedAllProxy; $env:all_proxy = $savedAllProxy }
-          if ($savedHttpProxy) { $env:HTTP_PROXY = $savedHttpProxy }
-          if ($savedHttpsProxy) { $env:HTTPS_PROXY = $savedHttpsProxy }
-
-      - name: Check Tailscale Auth Key
-        shell: powershell
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
-            Write-Error "TAILSCALE_AUTH_KEY secret is EMPTY or NOT SET"
-            Write-Host "Go to: https://github.com/lawdachuss/rdp-goondvr/settings/secrets/actions"
-            exit 1
+          $j1 = Start-Job -ScriptBlock {
+            $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"; $i = "$env:TEMP\tailscale.msi"
+            Invoke-WebRequest -Uri $url -OutFile $i -UseBasicParsing
+            Start-Process msiexec.exe -ArgumentList "/i `"$i`" /qn /norestart" -Wait; Remove-Item $i -Force
           }
-          Write-Host "[OK] TAILSCALE_AUTH_KEY is set (length: $($env:TAILSCALE_AUTH_KEY.Length))"
+          $j2 = Start-Job -ScriptBlock {
+            $s = $env:ALL_PROXY; Remove-Item Env:ALL_PROXY,Env:all_proxy,Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
+            $env:NO_PROXY = "community.chocolatey.org,chocolatey.org"
+            choco install ffmpeg -y --no-progress 2>&1 | Out-Null
+            if ($s) { $env:ALL_PROXY = $s; $env:all_proxy = $s }
+          }
+          $null = $j1, $j2 | Wait-Job -Timeout 120 -ErrorAction SilentlyContinue
+          Receive-Job $j1, $j2 -ErrorAction SilentlyContinue | Out-Null
+          Remove-Job $j1, $j2 -Force -ErrorAction SilentlyContinue
+          $ffver = & ffmpeg.exe -version 2>&1; Write-Host "FFmpeg: $($ffver | Select-Object -First 1)"
 
-      - name: Connect Tailscale
+      - name: Check & Connect Tailscale
         shell: powershell
         run: |
-          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          $svc = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
-          if ($null -eq $svc) { Write-Error "Tailscale service not found"; exit 1 }
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $svc = Get-Service Tailscale -ErrorAction SilentlyContinue
+          if (-not $svc) { Write-Error "Tailscale not installed"; exit 1 }
           if ($svc.Status -ne 'Running') { Start-Service Tailscale -ErrorAction Stop }
-
-          Write-Host "Waiting for Tailscale daemon..."
-          $ready = $false
-          for ($i = 0; $i -lt 15; $i++) {
-            try {
-              $out = & $tailscale status 2>&1
-              if ($LASTEXITCODE -eq 0 -or ($out -match "Logged out|NeedsLogin|Running|stopped")) { $ready = $true; break }
-            } catch {}
-            Start-Sleep -Seconds 2
-          }
-          if (-not $ready) { Write-Error "Tailscale daemon not ready after 30s"; exit 1 }
-
-          Write-Host "Authenticating Tailscale..."
-          & $tailscale up `
-            --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" `
-            --hostname="github-rdp-${{ github.run_id }}" `
-            --accept-routes `
-            --accept-dns=false `
-            --timeout=60s
+          for ($i = 0; $i -lt 15; $i++) { try { $out = & $ts status 2>&1; if ($LASTEXITCODE -eq 0 -or ($out -match "Logged out|NeedsLogin|Running|stopped")) { break } } catch {}; Start-Sleep -Seconds 2 }
+          & $ts up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="github-rdp-${{ github.run_id }}" --accept-routes --accept-dns=false --timeout=60s
           if ($LASTEXITCODE -ne 0) { Write-Error "tailscale up failed"; exit 1 }
-
-          Write-Host "-------- TAILSCALE STATUS --------"
-          & $tailscale status
-
-          $ip = $null
           for ($attempt = 0; $attempt -lt 2; $attempt++) {
-            $ip = $null
-            for ($i = 0; $i -lt 15; $i++) {
-              try {
-                $candidate = (& $tailscale ip -4 2>&1 | Select-Object -First 1).Trim()
-                if ($candidate -match '^\d+\.\d+\.\d+\.\d+$') { $ip = $candidate; break }
-              } catch {}
-              Start-Sleep -Seconds 3
-            }
-            if ($ip) { break }
-            Write-Host "Retrying Tailscale auth (attempt $($attempt+1))..."
-            & $tailscale logout
-            Start-Sleep -Seconds 3
-            & $tailscale up `
-              --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" `
-              --hostname="github-rdp-${{ github.run_id }}" `
-              --accept-routes `
-              --accept-dns=false `
-              --timeout=60s `
-              --reset
-            if ($LASTEXITCODE -ne 0) { Write-Error "tailscale up retry failed"; exit 1 }
+            for ($i = 0; $i -lt 15; $i++) { try { $ip = (& $ts ip -4 2>&1 | Select-Object -First 1).Trim(); if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV; Write-Host "[OK] Tailscale IP: $ip"; exit 0 } } catch {}; Start-Sleep -Seconds 3 }
+            & $ts logout; Start-Sleep -Seconds 3
+            & $ts up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="github-rdp-${{ github.run_id }}" --accept-routes --accept-dns=false --timeout=60s --reset
             Start-Sleep -Seconds 5
           }
-          if (-not $ip) { Write-Error "No Tailscale IP assigned after 45s"; exit 1 }
-
-          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
-          Write-Host "[OK] Tailscale IP: $ip"
-          $LASTEXITCODE = 0
+          Write-Error "No Tailscale IP after retry"; exit 1
 
       - name: Verify Proxy + Tailscale
         shell: powershell
         run: |
-          Write-Host "=== PROXY SETTINGS ==="
           Write-Host "ALL_PROXY=$env:ALL_PROXY"
-          Write-Host "GIT proxy: $(git config --global http.proxy)"
-          Write-Host ""
-          Write-Host "=== TAILSCALE ==="
-          if ($env:TAILSCALE_IP) { Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue | Select-Object ComputerName, TcpTestSucceeded }
-
-      - name: Verify RDP via Tailscale
-        shell: powershell
-        run: |
-          Write-Host "Checking RDP on $env:TAILSCALE_IP:3389..."
-          $success = $false
-          for ($i = 0; $i -lt 10; $i++) {
-            $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-            if ($test.TcpTestSucceeded) { $success = $true; break }
-            Write-Host "Attempt $($i+1)/10 failed, retrying in 10s..."
-            Start-Sleep -Seconds 10
-          }
-          if (-not $success) { Write-Error "RDP port 3389 not reachable on $env:TAILSCALE_IP after 100s"; exit 1 }
-          Write-Host "[OK] RDP reachable via Tailscale."
-
-      - name: Clone node-3 to D:\
-        shell: powershell
-        run: |
-          $repoDir = "D:\repos\node-3"
-          New-Item -ItemType Directory -Force -Path "D:\repos" | Out-Null
-          if (Test-Path $repoDir) { Remove-Item -Recurse -Force $repoDir }
-          Write-Host "Using checked-out repo code (commit: $(git rev-parse --short HEAD))..."
-          
-          # Use the already-checked-out code from actions/checkout
-          # This ensures CI always uses the latest code from this repo
-          New-Item -ItemType Directory -Force -Path $repoDir | Out-Null
-          Copy-Item -Path "$env:GITHUB_WORKSPACE\*" -Destination $repoDir -Recurse -Force
-          Write-Host "[OK] Copied local repo to $repoDir"
+          Write-Host "TAILSCALE_IP=$env:TAILSCALE_IP"
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26'
 
-      - name: Install Scrapling (Python Cloudflare bypass)
+      - name: Clone Repo & Build Grabber + Install Scrapling
         shell: powershell
         run: |
-          # Unset proxy vars - pip doesn't support SOCKS5
-          $savedAll = $env:ALL_PROXY; Remove-Item Env:ALL_PROXY -ErrorAction SilentlyContinue
-          $savedHttp = $env:HTTP_PROXY; Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
-          $savedHttps = $env:HTTPS_PROXY; Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:all_proxy,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
-          pip install "scrapling[fetchers]"
-          if ($LASTEXITCODE -ne 0) { throw "pip install scrapling failed" }
-          python -m playwright install chromium
-          if ($LASTEXITCODE -ne 0) { Write-Warning "playwright install chromium failed" }
-          # Restore proxy vars
-          if ($savedAll) { $env:ALL_PROXY = $savedAll; $env:all_proxy = $savedAll }
-          if ($savedHttp) { $env:HTTP_PROXY = $savedHttp }
-          if ($savedHttps) { $env:HTTPS_PROXY = $savedHttps }
-          Write-Host "[OK] Scrapling installed"
+          $repoDir = "D:\repos\node-3"
+          New-Item -ItemType Directory -Force -Path "D:\repos" | Out-Null
+          if (Test-Path $repoDir) { Remove-Item -Recurse -Force $repoDir }
+          New-Item -ItemType Directory -Force -Path $repoDir | Out-Null
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\*" -Destination $repoDir -Recurse -Force
 
-      - name: Refresh Chaturbate Cookies via Go Grabber (through SOCKS5 proxy)
+          # Scrapling install in background (pip/playwright don't need proxy)
+          $scrapleJob = Start-Job -ScriptBlock {
+            $sa = $env:ALL_PROXY; Remove-Item Env:ALL_PROXY,Env:all_proxy,Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
+            pip install "scrapling[fetchers]" 2>&1 | Out-Null
+            python -m playwright install chromium 2>&1 | Out-Null
+            if ($sa) { $env:ALL_PROXY = $sa; $env:all_proxy = $sa }
+          }
+
+          # Build grab_cookies (synchronous - Go needs PATH from setup-go)
+          Set-Location $repoDir
+          $sa = $env:ALL_PROXY; Remove-Item Env:ALL_PROXY,Env:all_proxy,Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
+          $env:GOPROXY = "https://proxy.golang.org,direct"
+          go build -o grab-cookies.exe ./cmd/grab_cookies 2>&1
+          $buildExit = $LASTEXITCODE
+          if ($sa) { $env:ALL_PROXY = $sa; $env:all_proxy = $sa }
+          if ($buildExit -ne 0) { Write-Warning "grab-cookies build failed (exit $buildExit)" }
+
+          # Wait for Scrapling
+          $null = $scrapleJob | Wait-Job -Timeout 180 -ErrorAction SilentlyContinue
+          Receive-Job $scrapleJob -ErrorAction SilentlyContinue; Remove-Job $scrapleJob -Force -ErrorAction SilentlyContinue
+
+          # Verify DVR binary
+          $dvrExe = "$repoDir\chaturbate-dvr.exe"
+          if (-not (Test-Path $dvrExe)) { Write-Error "DVR binary not found"; exit 1 }
+          $v = & $dvrExe --version 2>&1; Write-Host "DVR: $v"
+
+      - name: Write .env, Run Setup, Refresh Cookies
         shell: powershell
         env:
           MINI_ENV: ${{ secrets.MINI_ENV }}
         run: |
           $repoDir = "D:\repos\node-3"
-          if (-not (Test-Path $repoDir)) { Write-Error "Repo not found at $repoDir"; exit 1 }
-
-          # Write .env from secret so the grabber has the base config
-          if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
-            [System.IO.File]::WriteAllText("$repoDir\.env", $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Host "[OK] Wrote .env from secret"
-          } else {
-            Write-Warning "MINI_ENV secret is empty - cookie grabber may have no base config"
-          }
-
-          # Keep existing COOKIES in .env so the grabber can merge old cf_clearance
-          # with fresh __cf_bm.  If we cleared them and the proxy can't solve the
-          # Cloudflare challenge, the DVR would lose cf_clearance entirely.
-          $envPath = "$repoDir\.env"
-
           Set-Location $repoDir
 
-          # Build the Go cookie grabber
-          # Temporarily remove proxy env vars so Go can download modules directly
-          $savedAllProxy = $env:ALL_PROXY
-          $savedHttpProxy = $env:HTTP_PROXY
-          $savedHttpsProxy = $env:HTTPS_PROXY
-          Remove-Item Env:ALL_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:all_proxy -ErrorAction SilentlyContinue
-          Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:http_proxy -ErrorAction SilentlyContinue
-          Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
-          $env:GOPROXY = "https://proxy.golang.org,direct"
-          $env:GONOSUMDB = "*"
-          $env:GONOSUMCHECK = "*"
-          $env:GOFLAGS = "-mod=mod"
-          Write-Host "Building cookie grabber..."
-          Write-Host "  Go env: $(go env GOPROXY GONOSUMDB GONOSUMCHECK GOFLAGS)"
-          $oldEAP = $ErrorActionPreference
-          $ErrorActionPreference = 'Continue'
-          $buildOut = go build -o grab-cookies.exe ./cmd/grab_cookies 2>&1
-          $buildExit = $LASTEXITCODE
-          $ErrorActionPreference = $oldEAP
-          # Restore proxy env vars after build
-          if ($savedAllProxy) { $env:ALL_PROXY = $savedAllProxy; $env:all_proxy = $savedAllProxy }
-          if ($savedHttpProxy) { $env:HTTP_PROXY = $savedHttpProxy }
-          if ($savedHttpsProxy) { $env:HTTPS_PROXY = $savedHttpsProxy }
-          if ($buildExit -ne 0) {
-            Write-Host "Build failed (exit $buildExit). Full output:"
-            $buildOut | ForEach-Object { Write-Host "  $_" }
-            Write-Host "Falling back to old COOKIES from secret - rewriting .env"
-            if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
-              [System.IO.File]::WriteAllText($envPath, $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
-              Write-Host "[OK] Restored old COOKIES from secret - DVR will continue with existing cookies"
-            }
-          }
-          Write-Host "[OK] Grabber built"
-
-          # Run the grabber - it reads PROXY_URL/ALL_PROXY from env (set by proxy step),
-          # connects to Chaturbate through the SOCKS5 tunnel, gets fresh cookies,
-          # and writes them to .env.
-          Write-Host "Running cookie grabber through proxy..."
-          Write-Host "  PROXY_URL=$env:PROXY_URL"
-          $oldEAP = $ErrorActionPreference
-          $ErrorActionPreference = 'Continue'
-          .\grab-cookies.exe 2>&1
-          $grabExit = $LASTEXITCODE
-          $ErrorActionPreference = $oldEAP
-
-          Remove-Item .\grab-cookies.exe -Force -ErrorAction SilentlyContinue
-
-          if ($grabExit -ne 0) {
-            Write-Warning "Cookie grabber exited with code $grabExit - falling back to old COOKIES from secret"
-            if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
-              [System.IO.File]::WriteAllText($envPath, $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
-              Write-Host "[OK] Restored old COOKIES from secret - DVR will continue with existing cookies"
-            } else {
-              Write-Error "No MINI_ENV secret set - cannot recover cookies"
-              exit 1
-            }
+          # Write .env from secret (base config)
+          if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
+            [System.IO.File]::WriteAllText("$repoDir\.env", $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
           }
 
-          # Verify cookies were written
-          $envContent = Get-Content $envPath -Raw -ErrorAction SilentlyContinue
-          if ($envContent -match '(?m)^COOKIES=') {
-            Write-Host "[OK] Cookies written to .env"
-          } else {
-            Write-Warning "COOKIES not found in .env after grabber - falling back"
-            if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
-              [System.IO.File]::WriteAllText($envPath, $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
-              Write-Host "[OK] Restored old COOKIES from secret"
-            }
+          # Run setup.bat (installs python + other deps)
+          $env:NO_PROXY = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
+          if (Test-Path ".\setup.bat") { cmd /c ".\setup.bat -NoAppStart" 2>&1 }
+          Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue
+
+          # Run cookie grabber (through proxy)
+          if (Test-Path ".\grab-cookies.exe") {
+            $out = .\grab-cookies.exe 2>&1
+            $grabExit = $LASTEXITCODE
+            Remove-Item ".\grab-cookies.exe" -Force -ErrorAction SilentlyContinue
+            if ($grabExit -ne 0) { Write-Warning "grab-cookies failed (exit $grabExit)" }
           }
 
-      - name: Write .env + install deps + create scheduled tasks
-        shell: powershell
-        env:
-          MINI_ENV: ${{ secrets.MINI_ENV }}
-        run: |
-          $repoDir = "D:\repos\node-3"
-          if (-not (Test-Path $repoDir)) { Write-Error "Repo not found"; exit 1 }
-
-          # Save fresh cookies and user-agent from the grabber step before they get overwritten
+          # Restore fresh cookies (grabber wrote them, but .env was overwritten by secret above)
           $freshEnv = Get-Content "$repoDir\.env" -Raw -ErrorAction SilentlyContinue
           $freshCookies = if ($freshEnv -match '(?m)^COOKIES=.*$') { $matches[0] } else { "" }
           $freshUA = if ($freshEnv -match '(?m)^USER_AGENT=.*$') { $matches[0] } else { "" }
-
-          if ([string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
-            Write-Warning "Secret 'env' is empty - skipping .env file"
-          } else {
-            # Write .env to repo directory (may overwrite fresh cookies - restored below)
-            [System.IO.File]::WriteAllText("$repoDir\.env", $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Host "[OK] Wrote .env file to $repoDir\.env"
-            
-            # Verify .env was written
-            if (Test-Path "$repoDir\.env") {
-              $envSize = (Get-Item "$repoDir\.env").Length
-              Write-Host "[OK] Verified .env exists ($envSize bytes)"
-            } else {
-              Write-Error ".env file was not created"
-              exit 1
-            }
-          }
-
-          # Restore fresh cookies and user-agent from grabber (don't overwrite with stale secret values)
           if ($freshCookies -ne "") {
-            $currentContent = Get-Content "$repoDir\.env" -Raw -ErrorAction SilentlyContinue
-            $currentContent = $currentContent -replace '(?m)^COOKIES=.*$', $freshCookies
-            if ($freshUA -ne "") {
-              $currentContent = $currentContent -replace '(?m)^USER_AGENT=.*$', $freshUA
+            $content = Get-Content "$repoDir\.env" -Raw -ErrorAction SilentlyContinue
+            if ($content) {
+              $content = $content -replace '(?m)^COOKIES=.*$', $freshCookies
+              if ($freshUA -ne "") { $content = $content -replace '(?m)^USER_AGENT=.*$', $freshUA }
+              [System.IO.File]::WriteAllText("$repoDir\.env", $content, (New-Object System.Text.UTF8Encoding($false)))
             }
-            [System.IO.File]::WriteAllText("$repoDir\.env", $currentContent, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Host "[OK] Restored fresh cookies from grabber (not using stale secret values)"
           }
 
-          Set-Location $repoDir
+          Write-Host "[OK] .env ready ($((Get-Item "$repoDir\.env").Length) bytes)"
 
-          # Run setup.bat - exclude PyPI from proxy so pip can download deps
-          $env:NO_PROXY = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
-          $env:no_proxy = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
-          if (Test-Path ".\setup.bat") {
-            Write-Host "=== Running setup.bat with -NoAppStart ==="
-            cmd /c ".\setup.bat -NoAppStart"
-            if ($LASTEXITCODE -ne 0) { Write-Error "setup.bat failed"; exit 1 }
-            Write-Host "[OK] setup.bat completed"
+      - name: Configure Browser Proxy (SOCKS5 → HTTP)
+        shell: powershell
+        run: |
+          $proxyUrl = $env:ALL_PROXY
+          if ($proxyUrl -match 'socks5://([^:]+):(\d+)') {
+            $proxyHost = $matches[1]; $proxyPort = $matches[2]
+            $alreadyRunning = Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue
+            if (-not $alreadyRunning) {
+              $s2hExe = "C:\proxy\socks-to-http-proxy.exe"
+              New-Item -ItemType Directory -Force -Path "C:\proxy" | Out-Null
+              try {
+                Invoke-WebRequest -Uri "https://github.com/KaranGauswami/socks-to-http-proxy/releases/download/v0.5.0/sthp-windows.exe" -OutFile $s2hExe -UseBasicParsing -TimeoutSec 30
+                Start-Process -FilePath $s2hExe -ArgumentList "-p 8888 -s ${proxyHost}:${proxyPort}" -WindowStyle Hidden
+                for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Seconds 1; if (Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue) { break } }
+              } catch { Write-Warning "socks-to-http-proxy setup failed: $_" }
+            }
+            $listening = Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue
+            if ($listening) {
+              reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f | Out-Null
+              reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer /t REG_SZ /d "127.0.0.1:8888" /f | Out-Null
+              reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyOverride /t REG_SZ /d "localhost;127.*;10.*;172.*;192.168.*;*.local;<local>" /f | Out-Null
+              try { $ipViaProxy = curl.exe -x http://127.0.0.1:8888 -s -m 15 https://api.ipify.org 2>$null; Write-Host "[OK] Browser proxy: $ipViaProxy" } catch {}
+            }
           }
-          Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:no_proxy -ErrorAction SilentlyContinue
+          exit 0
 
-          # Step 2: Verify binary exists
+      - name: Create Scheduled Tasks & Cloudflared
+        shell: powershell
+        run: |
+          $repoDir = "D:\repos\node-3"
           $dvrExe = "$repoDir\chaturbate-dvr.exe"
-          if (-not (Test-Path $dvrExe)) { Write-Error "Binary not found: $dvrExe"; exit 1 }
-          Write-Host "[OK] Binary exists at $dvrExe ($((Get-Item $dvrExe).Length) bytes)"
-
-          Write-Host "=== Binary validation ==="
-          $v = & $dvrExe --version 2>&1
-          Write-Host "Version: $v"
-          Write-Host "[OK] DVR binary is ready"
-
-          # Create a scheduled task that starts DVR (accessible from all sessions and persists)
-          Write-Host "=== Creating system-wide DVR scheduled task ==="
-          $taskName = "ChaturbateDVR"
-          
-          # Create videos directory on D: drive (150GB temp storage)
           $videosDir = "D:\videos"
           New-Item -ItemType Directory -Force -Path $videosDir | Out-Null
-          Write-Host "[OK] Created videos directory: $videosDir"
-          
-          # Remove existing task if present
-          Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-          
-          # CRITICAL: Create wrapper script that sets proxy environment variables
-          # Scheduled tasks don't inherit environment variables, so we need a wrapper
-          $wrapperScript = "$repoDir\start-dvr-with-proxy.ps1"
-          $proxyUrl = $env:ALL_PROXY
-          
-          # Wrapper script will be created below with logging support
-          
-          # Use PowerShell method (cleaner than schtasks with complex paths/arguments)
-          # CRITICAL: Set WorkingDirectory to ensure .env is found
-          Write-Host "DVR will run from working directory: $repoDir"
-          Write-Host "DVR will save videos to: $videosDir"
-          Write-Host ".env file location: $repoDir\.env"
-          Write-Host "DVR proxy: $proxyUrl"
-          
-          # Add output redirection to wrapper script for debugging
-          $proxyLabel = if ($proxyUrl) { "Netherlands proxy" } else { "direct connection" }
-          if ($proxyUrl) {
-            $proxyLines = @(
-              "`$env:ALL_PROXY = `"$proxyUrl`"",
-              "`$env:all_proxy = `"$proxyUrl`"",
-              "# NOTE: Do NOT set HTTP_PROXY/HTTPS_PROXY to a SOCKS5 URL!",
-              "# Go's http.DefaultTransport uses these for outgoing requests",
-              "# and expects an HTTP proxy, not SOCKS5. The DVR uses PROXY_URL",
-              "# (via httpcloak) which handles SOCKS5 natively.",
-              "`$env:SOCKS_PROXY = `"$proxyUrl`"",
-              "# PROXY_URL is already set at workflow level with comma-separated list",
-              "# for automatic rotation. Only set if not already present.",
-              "if (-not `$env:PROXY_URL) { `$env:PROXY_URL = `"$proxyUrl`" }",
-              "if (-not `$env:PROXY_SERVER) { `$env:PROXY_SERVER = `"$proxyUrl`" }"
-            )
-          } else {
-            $proxyLines = @(
-              "# No proxy configured - DVR will connect directly",
-              "Remove-Item Env:PROXY_URL -ErrorAction SilentlyContinue",
-              "Remove-Item Env:ALL_PROXY -ErrorAction SilentlyContinue",
-              "Remove-Item Env:SOCKS_PROXY -ErrorAction SilentlyContinue"
-            )
+
+          # Cloudflared (cached or download)
+          $cloudflaredPath = "$repoDir\cloudflared.exe"
+          if (-not (Test-Path $cloudflaredPath) -or ((Get-Item $cloudflaredPath).Length -lt 1MB)) {
+            Write-Host "Downloading cloudflared..."
+            for ($r = 1; $r -le 3; $r++) {
+              try { Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cloudflaredPath -UseBasicParsing -TimeoutSec 30; break } catch { Start-Sleep -Seconds 2 }
+            }
+            if ((Get-Item $cloudflaredPath -ErrorAction SilentlyContinue).Length -lt 1MB) { Write-Warning "cloudflared download failed"; $cloudflaredPath = $null }
           }
+
+          $proxyUrl = $env:ALL_PROXY
+          $proxyLabel = if ($proxyUrl) { "Netherlands proxy" } else { "direct" }
+
+          # DVR wrapper script
+          $wrapperScript = "$repoDir\start-dvr.ps1"
           $wrapperLines = @(
-            "# DVR Wrapper Script - Sets proxy environment variables before starting DVR",
-            "`$logFile = `"$repoDir\dvr-wrapper.log`"",
-            "Start-Transcript -Path `$logFile -Append",
-            ""
-          ) + $proxyLines + @(
-            "# Pooled mode env vars (distributed shards)",
-            "`$env:CHANNEL_POOL_MODE = `"${{ secrets.CHANNEL_POOL_MODE }}`"",
-            "`$env:NODE_ID = `"${{ secrets.NODE_ID }}`"",
-            "# Session duration controls how long the DVR records before uploading and cycling",
-            "`$env:SESSION_DURATION = `"${{ secrets.SESSION_DURATION }}`"",
-            "# Upload host API keys",
-            "`$env:VIDHIDE_API_KEY = `"${{ secrets.VIDHIDE_API_KEY }}`"",
-            "`$env:STREAMWISH_API_KEY = `"${{ secrets.STREAMWISH_API_KEY }}`"",
-            "`$env:UPNSHARE_KEY = `"${{ secrets.UPNSHARE_KEY }}`"",
-            "`$env:DOODSTREAM_API_KEY = `"${{ secrets.DOODSTREAM_API_KEY }}`"",
-            "`$env:USER_AGENT = `"$env:USER_AGENT`"",
-            "# Disable HTTP_PROXY/HTTPS_PROXY for Go's default transport",
-            "# to prevent Go from trying to use SOCKS5 as HTTP proxy.",
-            "# Go's http.DefaultTransport reads these env vars and would",
-            "# break on socks5:// URLs (expects http/https proxy).",
-            "Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue",
-            "Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue",
-            "Remove-Item Env:http_proxy -ErrorAction SilentlyContinue",
-            "Remove-Item Env:https_proxy -ErrorAction SilentlyContinue",
-            "",
-            "Write-Host `"[DVR Wrapper] Starting chaturbate-dvr.exe with $proxyLabel`"",
-            "Write-Host `"[DVR Wrapper] Proxy: $proxyUrl`"",
-            "Write-Host `"[DVR Wrapper] Working Directory: $repoDir`"",
-            "Write-Host `"[DVR Wrapper] Videos Directory: $videosDir`"",
-            "Write-Host `"[DVR Wrapper] Time: `$(Get-Date)`"",
-            "",
-            "Set-Location `"$repoDir`"",
-            "",
-            "# Check if .env exists",
-            "if (Test-Path `".env`") {",
-            "    Write-Host `"[DVR Wrapper] .env file found`"",
-            "} else {",
-            "    Write-Host `"[DVR Wrapper] WARNING: .env file NOT found`"",
-            "}",
-            "",
-            "Write-Host `"[DVR Wrapper] Starting DVR binary...`"",
-            "Stop-Transcript",
-            "",
-            "# Start DVR process with proxy environment",
-            "# Redirect stdout/stderr to a log file so we can debug crashes",
-            "`$dvrLog = `"$repoDir\dvr-output.log`"",
-            "& `"$dvrExe`" --no-tunnel --output-dir `"$videosDir`" *>&1 | Tee-Object -FilePath `"$dvrLog`" -Append"
+            "# DVR Wrapper",
+            "`$env:ALL_PROXY = `"$proxyUrl`"", "`$env:all_proxy = `"$proxyUrl`"", "`$env:SOCKS_PROXY = `"$proxyUrl`""
+            "`$env:CHANNEL_POOL_MODE = `"${{ secrets.CHANNEL_POOL_MODE }}`"", "`$env:NODE_ID = `"${{ secrets.NODE_ID }}`""
+            "`$env:SESSION_DURATION = `"${{ secrets.SESSION_DURATION }}`""
+            "`$env:VIDHIDE_API_KEY = `"${{ secrets.VIDHIDE_API_KEY }}`"", "`$env:STREAMWISH_API_KEY = `"${{ secrets.STREAMWISH_API_KEY }}`""
+            "`$env:UPNSHARE_KEY = `"${{ secrets.UPNSHARE_KEY }}`"", "`$env:DOODSTREAM_API_KEY = `"${{ secrets.DOODSTREAM_API_KEY }}`""
+            "Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue"
+            "Set-Location `"$repoDir`""
+            "`$log = `"$repoDir\dvr-output.log`""
+            "& `"$dvrExe`" --no-tunnel --output-dir `"$videosDir`" *>&1 | Tee-Object -FilePath `"`$log`" -Append"
           )
-          $wrapperContent = $wrapperLines -join "`r`n"
-          Set-Content -Path $wrapperScript -Value $wrapperContent -Force
-          Write-Host "[OK] Created DVR wrapper script with logging: $wrapperScript"
-          
-          # Run PowerShell wrapper script instead of DVR directly
-          # Use -NoExit to keep PowerShell window open for debugging
+          Set-Content -Path $wrapperScript -Value ($wrapperLines -join "`r`n") -Force
+
+          # DVR scheduled task
+          Unregister-ScheduledTask -TaskName "ChaturbateDVR" -Confirm:$false -ErrorAction SilentlyContinue
           $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NoProfile -File `"$wrapperScript`"" -WorkingDirectory $repoDir
           $trigger = New-ScheduledTaskTrigger -AtStartup
           $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 0)
-          
-          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-          Write-Host "[OK] DVR scheduled task created (with proxy wrapper)"
-          
-          # Verify task was created
-          $taskExists = schtasks /Query /TN $taskName 2>&1
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "[OK] Verified task exists in Task Scheduler"
-          } else {
-            Write-Warning "Task may not have been created successfully"
-          }
-          
-          Write-Host "[OK] DVR scheduled task created (with proxy wrapper)"
-          Write-Host "=== Setting up Cloudflare tunnel ==="
-          
-          # Download cloudflared to repo directory
-          $cloudflaredPath = "$repoDir\cloudflared.exe"
-          
-          Write-Host "Downloading cloudflared..."
-          $downloadSuccess = $false
-          $maxRetries = 3
-          
-          for ($retry = 1; $retry -le $maxRetries; $retry++) {
-            try {
-              Write-Host "Download attempt $retry/$maxRetries..."
-              $ProgressPreference = 'SilentlyContinue'
-              Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cloudflaredPath -UseBasicParsing -TimeoutSec 30
-              
-              if (Test-Path $cloudflaredPath) {
-                $size = (Get-Item $cloudflaredPath).Length
-                if ($size -gt 1MB) {
-                  Write-Host "[OK] Cloudflared downloaded successfully ($([math]::Round($size/1MB, 2)) MB)"
-                  $downloadSuccess = $true
-                  break
-                } else {
-                  Write-Warning "Downloaded file is too small ($size bytes), retrying..."
-                  Remove-Item $cloudflaredPath -Force -ErrorAction SilentlyContinue
-                }
-              }
-            } catch {
-              Write-Warning "Download attempt $retry failed: $_"
-              Start-Sleep -Seconds 2
-            }
-          }
-          
-          if (-not $downloadSuccess) {
-            Write-Error "Failed to download cloudflared after $maxRetries attempts"
-            Write-Host "DVR will still be accessible at http://localhost:8080"
-            $cloudflaredPath = $null
-          }
-          
-          if ($cloudflaredPath -and (Test-Path $cloudflaredPath)) {
-            Write-Host "Creating cloudflared wrapper script (with auto-reconnect)..."
-            
-            # Create a PowerShell wrapper script (like DVR's wrapper) with restart loop
-            $tunnelWrapperScript = "$repoDir\start-tunnel.ps1"
-            $tunnelLogPath = "$repoDir\tunnel.log"
-            $tunnelUrlFile = "$repoDir\tunnel-url.txt"
-            
-            $tunnelWrapperLines = @(
-              "# Cloudflared tunnel wrapper with auto-reconnect",
-              "`$logFile = `"$tunnelLogPath`"",
-              "`$tunnelUrlFile = `"$tunnelUrlFile`"",
-              "`$cloudflared = `"$cloudflaredPath`"",
-              "`$repoDir = `"$repoDir`"",
-              "",
-              "# Set proxy for cloudflared edge connection (HTTP_PROXY works with cloudflared)",
-              "`$env:HTTP_PROXY = `"http://127.0.0.1:8888`"",
-              "`$env:HTTPS_PROXY = `"http://127.0.0.1:8888`"",
-              "# Fallback: try SOCKS5 directly if HTTP proxy is not available",
-              "if (-not (Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue)) {",
-              "    Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue",
-              "    Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue",
-              "    Write-Host `"[Tunnel Wrapper] No HTTP proxy on 8888, connecting directly`"",
-              "}",
-              "",
-              "while (`$true) {",
-              "    Write-Host `"[Tunnel Wrapper] Starting cloudflared tunnel at `$(Get-Date)`"",
-              "    `$stderrFile = Join-Path `$repoDir `"cloudflared-stderr.log`"",
-              "    if (Test-Path `$stderrFile) { Remove-Item `$stderrFile -Force }",
-              "",
-              "    `$args = `"tunnel --url http://localhost:8080 --protocol http2`"",
-              "    `$proc = Start-Process -FilePath `$cloudflared -ArgumentList `$args -WorkingDirectory `$repoDir -NoNewWindow -RedirectStandardError `$stderrFile -PassThru",
-              "",
-              "    # Poll stderr file for tunnel URL (cloudflared prints it to stderr)",
-              "    `$urlFound = `$false",
-              "    for (`$i = 0; `$i -lt 30; `$i++) {",
-              "        Start-Sleep -Seconds 2",
-              "        if (-not (Test-Path `$stderrFile)) { continue }",
-              "        `$content = Get-Content `$stderrFile -Raw -ErrorAction SilentlyContinue",
-              "        if (`$content -match 'https://[a-z0-9\\-]+\\.trycloudflare\\.com') {",
-              "            `$url = `$urlMatch.Value",
-              "            `$url | Set-Content -Path `$tunnelUrlFile -Force",
-              "            `$url | Out-File -FilePath `$logFile -Append",
-              "            Write-Host `"[Tunnel Wrapper] Tunnel URL: `$url`"",
-              "            `$urlFound = `$true",
-              "            break",
-              "        }",
-              "    }",
-              "",
-              "    if (-not `$urlFound) {",
-              "        `$errContent = Get-Content `$stderrFile -Raw -ErrorAction SilentlyContinue",
-              "        if (`$errContent) { `$errContent | Out-File -FilePath `$logFile -Append }",
-              "        Write-Host `"[Tunnel Wrapper] No URL found, restarting in 10s...`"",
-              "    }",
-              "",
-              "    # Wait for process to exit (tunnel disconnected)",
-              "    `$proc.WaitForExit()",
-              "    Write-Host `"[Tunnel Wrapper] Tunnel disconnected, restarting in 10s...`"",
-              "    Start-Sleep -Seconds 10",
-              "}"
+          Register-ScheduledTask -TaskName "ChaturbateDVR" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+
+          # Cloudflare tunnel wrapper + task
+          if ($cloudflaredPath) {
+            $twScript = "$repoDir\start-tunnel.ps1"
+            $twLines = @(
+              "while (`$true) {", "  Write-Host `"[Tunnel] Starting...`""
+              "  `$err = `"$repoDir\tunnel-stderr.log`"; if (Test-Path `$err) { Remove-Item `$err -Force }"
+              "  `$p = Start-Process -FilePath `"$cloudflaredPath`" -ArgumentList `"tunnel --url http://localhost:8080 --protocol http2`" -WorkingDirectory `"$repoDir`" -NoNewWindow -RedirectStandardError `$err -PassThru"
+              "  for (`$i = 0; `$i -lt 30; `$i++) { Start-Sleep -Seconds 2; if (Test-Path `$err) { `$c = Get-Content `$err -Raw; if (`$c -match 'https://[a-z0-9\\-]+\\.trycloudflare\\.com') { Write-Host `"[Tunnel] URL: `$(`$matches[0])`"; break } } }"
+              "  `$p.WaitForExit(); Write-Host `"[Tunnel] Exited, restarting in 10s...`"; Start-Sleep -Seconds 10", "}"
             )
-            $tunnelWrapperContent = $tunnelWrapperLines -join "`r`n"
-            Set-Content -Path $tunnelWrapperScript -Value $tunnelWrapperContent -Force
-            Write-Host "[OK] Created cloudflared wrapper script: $tunnelWrapperScript"
-            
-            # Remove existing task if present
+            Set-Content -Path $twScript -Value ($twLines -join "`r`n") -Force
             Unregister-ScheduledTask -TaskName "CloudflareTunnel" -Confirm:$false -ErrorAction SilentlyContinue
-            
-            # Create scheduled task that runs the wrapper
-            $tunnelAction = New-ScheduledTaskAction `
-              -Execute "powershell.exe" `
-              -Argument "-ExecutionPolicy Bypass -NoProfile -File `"$tunnelWrapperScript`"" `
-              -WorkingDirectory $repoDir
-            $tunnelTrigger = New-ScheduledTaskTrigger -AtStartup
-            $tunnelTrigger.Delay = "PT30S"
-            $tunnelPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-            $tunnelSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Days 0)
-            
-            Register-ScheduledTask -TaskName "CloudflareTunnel" -Action $tunnelAction -Trigger $tunnelTrigger -Principal $tunnelPrincipal -Settings $tunnelSettings -Force | Out-Null
-            Write-Host "[OK] Cloudflared tunnel scheduled task created"
-            
-            # Verify cloudflared task was created
-            try {
-              $cfTask = Get-ScheduledTask -TaskName "CloudflareTunnel" -ErrorAction Stop
-              Write-Host "[OK] Verified cloudflared task exists in Task Scheduler (State: $($cfTask.State))"
-            } catch {
-              Write-Error "Failed to verify cloudflared scheduled task: $_"
-              $cfTaskExists = schtasks /Query /TN "CloudflareTunnel" 2>&1
-              if ($LASTEXITCODE -ne 0) {
-                Write-Error "Cloudflared task was not created successfully"
-              }
-            }
-            
-            Write-Host "[OK] Cloudflared tunnel scheduled task created (for reboot persistence)"
+            $ta = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NoProfile -File `"$twScript`"" -WorkingDirectory $repoDir
+            $tt = New-ScheduledTaskTrigger -AtStartup; $tt.Delay = "PT30S"
+            Register-ScheduledTask -TaskName "CloudflareTunnel" -Action $ta -Trigger $tt -Principal $principal -Settings $settings -Force | Out-Null
           }
 
-      - name: Configure Proxy for DVR and Browsers
-        shell: powershell
-        run: |
-          # Use socks-to-http-proxy (simpler than 3proxy)
-          $proxyUrl = $env:ALL_PROXY
-          
-          if ($proxyUrl -match 'socks5://([^:]+):(\d+)') {
-            $proxyHost = $matches[1]
-            $proxyPort = $matches[2]
-            
-            Write-Host "=== Setting up Proxy ==="
-            Write-Host "Netherlands SOCKS5: $proxyHost`:$proxyPort"
-            Write-Host ""
-            
-            $s2hExe = "C:\proxy\socks-to-http-proxy.exe"
-            $alreadyRunning = Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue
-            
-            if (-not $alreadyRunning) {
-              # Download socks-to-http-proxy (single executable, no configuration needed)
-              Write-Host "Downloading socks-to-http-proxy..."
-              $s2hUrl = "https://github.com/KaranGauswami/socks-to-http-proxy/releases/download/v0.5.0/sthp-windows.exe"
-              
-              try {
-                New-Item -ItemType Directory -Force -Path "C:\proxy" | Out-Null
-                Invoke-WebRequest -Uri $s2hUrl -OutFile $s2hExe -UseBasicParsing -TimeoutSec 30
-                
-                if (Test-Path $s2hExe) {
-                  Write-Host "[OK] socks-to-http-proxy downloaded"
-                  
-                  # sthp CLI: -p <local-port> -s <socks5-host:port>
-                  $proxyArgs = "-p 8888 -s ${proxyHost}:${proxyPort}"
-                  Start-Process -FilePath $s2hExe -ArgumentList $proxyArgs -WindowStyle Hidden
-                  
-                  $started = $false
-                  for ($i = 0; $i -lt 15; $i++) {
-                    Start-Sleep -Seconds 1
-                    $listening = Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue
-                    if ($listening) { $started = $true; break }
-                  }
-                  if (-not $started) {
-                    Write-Warning "socks-to-http-proxy did not bind to port 8888 within 15s"
-                  }
-                }
-              } catch {
-                Write-Warning "Proxy setup failed: $_"
-                Write-Host "DVR will still work with direct SOCKS5"
-              }
-            } else {
-              Write-Host "[OK] HTTP proxy already running on port 8888"
-            }
-            
-            # Check if it's running
-            $listening = Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue
-                if ($listening) {
-                  Write-Host "[OK] HTTP proxy running on localhost:8888"
-                  
-                  # Configure Windows to use the HTTP proxy
-                  reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f | Out-Null
-                  reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer /t REG_SZ /d "127.0.0.1:8888" /f | Out-Null
-                  reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyOverride /t REG_SZ /d "localhost;127.*;10.*;172.*;192.168.*;*.local;<local>" /f | Out-Null
-                  Write-Host "[OK] Browser proxy configured"
-                  
-                  # Test the proxy chain
-                  Write-Host ""
-                  Write-Host "Testing proxy chain..."
-                  Start-Sleep -Seconds 2
-                  $ipViaProxy = curl.exe -x http://127.0.0.1:8888 -s -m 15 https://api.ipify.org 2>$null
-                  $LASTEXITCODE = 0
-                  if ($ipViaProxy -eq $proxyHost) {
-                    Write-Host "[SUCCESS] Proxy works! Browser will show: $ipViaProxy (Netherlands)"
-                  } elseif ($ipViaProxy) {
-                    Write-Host "[INFO] Proxy returned IP: $ipViaProxy"
-                  } else {
-                    Write-Host "[WARNING] Proxy test timed out - may need more time to connect"
-                  }
-                  
-                  Write-Host ""
-                  Write-Host "[SUCCESS] Proxy setup complete"
-                  Write-Host "  - Open browser in RDP and visit chaturbate.com"
-                  Write-Host "  - Should show Netherlands (no age verification)"
-                } else {
-                  Write-Warning "Proxy not listening on port 8888"
-                }
-            
-          } else {
-            Write-Warning "Could not parse SOCKS5 proxy URL: $proxyUrl"
-          }
-          $LASTEXITCODE = 0
-          exit 0
+          Write-Host "[OK] Scheduled tasks created"
 
       - name: Show Connection Details
         shell: powershell
         run: |
-          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          Write-Host ""
           Write-Host "========================================"
           Write-Host "  RDP VIA TAILSCALE"
           Write-Host "========================================"
-          Write-Host ""
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host ""
-          Write-Host "HOW TO CONNECT:"
-          Write-Host ""
-          Write-Host "1. Make sure Tailscale is running on your PC"
-          Write-Host ""
-          Write-Host "2. Open Remote Desktop Connection:"
-          Write-Host "   mstsc /v:$env:TAILSCALE_IP"
-          Write-Host ""
-          Write-Host "3. Enter RDP credentials:"
-          Write-Host "   Username: RDP"
-          Write-Host "   Password: $env:RDP_PASSWORD"
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "  DVR and tunnel will start in next step"
-          Write-Host "========================================"
-          $LASTEXITCODE = 0
+          Write-Host "mstsc /v:$env:TAILSCALE_IP"
 
       - name: Keep Runner Alive
         shell: powershell
@@ -1035,293 +406,76 @@ jobs:
           CHANNEL_POOL_MODE: ${{ secrets.CHANNEL_POOL_MODE }}
           NODE_ID: ${{ secrets.NODE_ID }}
         run: |
-          $repoDir = "D:\repos\node-3"
-          $dvrExe = "$repoDir\chaturbate-dvr.exe"
-          $videosDir = "D:\videos"
+          $repoDir = "D:\repos\node-3"; $dvrExe = "$repoDir\chaturbate-dvr.exe"; $videosDir = "D:\videos"
+          $dvrLog = "$repoDir\dvr-output.log"; $tunnelUrlFile = "$repoDir\tunnel-url.txt"; $uploadFlag = "$repoDir\upload-complete.flag"
           $cloudflaredPath = "$repoDir\cloudflared.exe"
-          $dvrLog = "$repoDir\dvr-output.log"
-          $tunnelLogPath = "$repoDir\tunnel.log"
-          $tunnelUrlFile = "$repoDir\tunnel-url.txt"
-          
-          # ====== START DVR ======
-          Write-Host "=== Starting DVR ==="
-          Set-Location $repoDir
-          
-          Write-Host "[OK] PROXY_URL=$env:PROXY_URL"
-          Write-Host "[OK] ALL_PROXY=$env:ALL_PROXY"
-          if ([string]::IsNullOrWhiteSpace($env:PROXY_URL)) {
-            Write-Host "[OK] 0 proxies - DVR will connect directly"
-          } else {
-            Write-Host "[OK] $($env:PROXY_URL.Split(',').Count) proxies available for rotation"
-          }
 
-          $backupHTTP = $env:HTTP_PROXY
-          $backupHTTPS = $env:HTTPS_PROXY
-          Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:http_proxy -ErrorAction SilentlyContinue
-          Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
-          
-          # Verify .env exists before starting DVR
-          if (Test-Path "$repoDir\.env") {
-            $envSize = (Get-Item "$repoDir\.env").Length
-            Write-Host "[OK] .env file found ($envSize bytes)"
-          } else {
-            Write-Warning ".env file NOT found at $repoDir\.env"
-          }
-          
-          # Pass SESSION_DURATION to DVR so it uses the configured session length
+          # Start DVR
+          Set-Location $repoDir
+          Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
           $env:SESSION_DURATION = "${{ secrets.SESSION_DURATION }}"
-          # Upload host API keys
-          $env:VIDHIDE_API_KEY = "${{ secrets.VIDHIDE_API_KEY }}"
-          $env:STREAMWISH_API_KEY = "${{ secrets.STREAMWISH_API_KEY }}"
-          $dvrProcess = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
-          Write-Host "[OK] DVR PID: $($dvrProcess.Id)"
-          
-          if ($backupHTTP) { $env:HTTP_PROXY = $backupHTTP }
-          if ($backupHTTPS) { $env:HTTPS_PROXY = $backupHTTPS }
-          
-          Write-Host "Waiting for DVR to listen on port 8080..."
-          $dvrReady = $false
+          $env:VIDHIDE_API_KEY = "${{ secrets.VIDHIDE_API_KEY }}"; $env:STREAMWISH_API_KEY = "${{ secrets.STREAMWISH_API_KEY }}"
+          $dvr = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
+          Write-Host "[OK] DVR PID: $($dvr.Id)"
+
+          # Wait for DVR
           for ($i = 0; $i -lt 90; $i++) {
-            if ($dvrProcess.HasExited) {
-              Write-Host "[ERROR] DVR process exited unexpectedly (code: $($dvrProcess.ExitCode))"
-              Write-Host "=== DVR stdout ==="
-              Get-Content $dvrLog -ErrorAction SilentlyContinue
-              Write-Host "=== DVR stderr ==="
-              Get-Content "$repoDir\dvr-err.log" -ErrorAction SilentlyContinue
-              break
-            }
-            try {
-              $listener = Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue
-              if ($listener) {
-                Write-Host "[OK] DVR is listening on port 8080"
-                $dvrReady = $true
-                break
-              }
-            } catch {}
+            if ($dvr.HasExited) { Write-Host "[ERROR] DVR exited (code: $($dvr.ExitCode))"; Get-Content $dvrLog -Tail 20; break }
+            if (Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue) { Write-Host "[OK] DVR on port 8080"; break }
             Start-Sleep -Seconds 2
           }
-          
-          if (-not $dvrReady) {
-            Write-Error "DVR not detected on port 8080 after 180 seconds"
-            exit 1
-          }
-          
-          # Verify HTTP response
-          Write-Host "Verifying DVR HTTP response..."
-          $dvrResponding = $false
-          for ($i = 0; $i -lt 10; $i++) {
-            try {
-              $response = Invoke-WebRequest -Uri "http://localhost:8080" -Method GET -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
-              Write-Host "[OK] DVR is responding (Status: $($response.StatusCode))"
-              $dvrResponding = $true
-              break
-            } catch {
-              if ($_.Exception.Response.StatusCode -eq 404) {
-                Write-Host "[OK] DVR is responding (Status: 404 - DVR is running)"
-                $dvrResponding = $true
-                break
-              }
-              Start-Sleep -Seconds 2
-            }
-          }
-          
-          if (-not $dvrResponding) {
-            Write-Error "DVR not responding to HTTP requests"
-            exit 1
-          }
-          
-          # ====== START CLOUDFLARE TUNNEL ======
-          Write-Host "=== Starting Cloudflare tunnel ==="
+
+          # Verify HTTP
+          for ($i = 0; $i -lt 10; $i++) { try { $r = Invoke-WebRequest -Uri "http://localhost:8080" -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop; break } catch { if ($_.Exception.Response.StatusCode -eq 404) { break }; Start-Sleep -Seconds 2 } }
+
+          # Tunnel
           $tunnelUrl = $null
           if (Test-Path $cloudflaredPath) {
-            # Run cloudflared directly - capture stderr for tunnel URL
-            $cloudflaredStderr = "$repoDir\cloudflared-stderr.log"
-            if (Test-Path $cloudflaredStderr) { Remove-Item $cloudflaredStderr -Force }
-            
-            $tunnelProc = Start-Process -FilePath $cloudflaredPath `
-              -ArgumentList "tunnel --url http://localhost:8080 --protocol http2" `
-              -WorkingDirectory $repoDir `
-              -NoNewWindow `
-              -RedirectStandardError $cloudflaredStderr `
-              -PassThru
-            Write-Host "[OK] cloudflared started (PID: $($tunnelProc.Id))"
-            
-            # Poll stderr for tunnel URL (cloudflared prints it to stderr)
-            Write-Host "Waiting for tunnel URL..."
-            for ($i = 0; $i -lt 45; $i++) {
-              Start-Sleep -Seconds 1
-              if (Test-Path $cloudflaredStderr) {
-                $errContent = Get-Content $cloudflaredStderr -Raw -ErrorAction SilentlyContinue
-                $urlMatch = [regex]::Match($errContent, 'https://[a-z0-9\-]+\.trycloudflare\.com')
-                if ($urlMatch.Success) {
-                  $tunnelUrl = $urlMatch.Value
-                  $tunnelUrl | Set-Content -Path $tunnelUrlFile -Force
-                  Write-Host "[OK] Tunnel URL found: $tunnelUrl"
-                  break
-                }
-              }
-              if ($i % 10 -eq 0 -and $i -gt 0) {
-                Write-Host "  Still waiting... ($i/45 seconds)"
-              }
-            }
-            if (-not $tunnelUrl) {
-              $stderrLog = if (Test-Path $cloudflaredStderr) { Get-Content $cloudflaredStderr -Raw } else { "(no file)" }
-              Write-Warning "Tunnel URL not found after 45 seconds"
-              Write-Warning "cloudflared stderr: $stderrLog"
-            }
+            $stderr = "$repoDir\tunnel-stderr.log"
+            $tun = Start-Process -FilePath $cloudflaredPath -ArgumentList "tunnel --url http://localhost:8080 --protocol http2" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardError $stderr -PassThru
+            for ($i = 0; $i -lt 45; $i++) { Start-Sleep -Seconds 1; if (Test-Path $stderr) { $c = Get-Content $stderr -Raw; $m = [regex]::Match($c, 'https://[a-z0-9\-]+\.trycloudflare\.com'); if ($m.Success) { $tunnelUrl = $m.Value; $tunnelUrl | Set-Content $tunnelUrlFile -Force; Write-Host "[OK] Tunnel: $tunnelUrl"; break } } }
+            # Report to DVR
+            if ($tunnelUrl) { for ($t = 0; $t -lt 10; $t++) { try { Invoke-RestMethod -Uri "http://localhost:8080/api/tunnel" -Method Post -Body (@{url=$tunnelUrl} | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction Stop | Out-Null; break } catch { Start-Sleep -Seconds 3 } } }
+          }
 
-            # Report the tunnel URL to the DVR so it can persist it to Supabase
-            # (nodes.web_url + tunnels table).  The admin panel's per-node "Visit"
-            # link reads nodes.web_url, so this must run every session.
-            function Report-TunnelUrl([string]$url) {
-              if (-not $url) { return }
-              for ($t = 0; $t -lt 10; $t++) {
-                try {
-                  $body = @{ url = $url } | ConvertTo-Json
-                  Invoke-RestMethod -Uri "http://localhost:8080/api/tunnel" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 5 -ErrorAction Stop | Out-Null
-                  Write-Host "[OK] Reported tunnel URL to DVR: $url"
-                  return
-                } catch {
-                  Start-Sleep -Seconds 3
-                }
-              }
-              Write-Warning "[WARN] Could not report tunnel URL to DVR after 10 attempts"
-            }
-            Report-TunnelUrl $tunnelUrl
-          } else {
-            Write-Host "[SKIP] cloudflared not found - DVR accessible via Tailscale only"
-          }
-          
-          # ====== SHOW CONNECTION INFO ======
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "  DVR ACCESS"
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host "PID: $($dvrProcess.Id)"
-          Write-Host "Access from inside RDP: http://localhost:8080"
-          Write-Host "Access from your PC: http://$env:TAILSCALE_IP`:8080"
-          if ($tunnelUrl) {
-            Write-Host "PUBLIC ACCESS: $tunnelUrl"
-          }
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host ""
-          
-          # ====== DUMP WORKFLOW SETUP LOGS ======
-          Write-Host "Saving workflow setup logs for /api/logs..."
+          # Save workflow logs
           $setupLog = "$repoDir\workflow-setup.log"
-          cmd /c "gh run view $env:GITHUB_RUN_ID --log --repo $env:GITHUB_REPOSITORY 2>nul" 2>$null | ForEach-Object {
-            $_ -replace '\x1b\[[0-9;]*m', '' -replace '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\s+', ''
-          } | Set-Content -Path $setupLog -Force
-          if ((Get-Item $setupLog -ErrorAction SilentlyContinue).Length -gt 0) {
-            Write-Host "[OK] Workflow setup logs saved ($((Get-Item $setupLog).Length) bytes)"
-          } else {
-            Write-Host "[WARN] Could not dump workflow logs (run still in progress)"
-          }
+          cmd /c "gh run view $env:GITHUB_RUN_ID --log --repo $env:GITHUB_REPOSITORY 2>nul" 2>$null | ForEach-Object { $_ -replace '\x1b\[[0-9;]*m', '' -replace '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\s+', '' } | Set-Content $setupLog -Force
 
-          # ====== KEEP-ALIVE LOOP ======
-          # Clear any stale flag from a previous session before we start
-          $uploadFlag = "$repoDir\upload-complete.flag"
+          # Keep-alive loop
           Remove-Item $uploadFlag -Force -ErrorAction SilentlyContinue
-
-          Write-Host "Keeping runner alive for up to 5 hours and 55 minutes..."
-          if ($tunnelUrl) {
-            Write-Host "Tunnel URL: $tunnelUrl"
-          }
-          Write-Host ""
-          
           $startTime = if ($env:START_TIME) { [int64]$env:START_TIME } else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
           $targetDuration = 355 * 60
-          
+
           while ($true) {
-            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-            $elapsed = $now - $startTime
-            if ($elapsed -ge $targetDuration) {
-              Write-Host "Session timeout reached ($elapsed seconds)."
-              break
-            }
-            
-            $remaining = $targetDuration - $elapsed
-            $sleepSecs = [Math]::Min($remaining, 60)
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $elapsed = $now - $startTime
+            if ($elapsed -ge $targetDuration) { Write-Host "Session timeout ($elapsed s)."; break }
+            $sleepSecs = [Math]::Min($targetDuration - $elapsed, 60)
             if ($sleepSecs -le 0) { break }
-            
-            # Restart DVR if it crashed
-            if ($dvrProcess.HasExited) {
-              Write-Host "[WARNING] DVR process exited (code: $($dvrProcess.ExitCode)) - restarting..."
-              # Pass remaining session time so the restarted DVR stops recordings at the right moment.
-              # Parse total session duration from secret (e.g. "5h20m0s") or fall back to 5h20m.
-              $sessionTotalStr = "${{ secrets.SESSION_DURATION }}"
-              if ([string]::IsNullOrEmpty($sessionTotalStr)) { $sessionTotalStr = "5h20m0s" }
-              $durMatch = [regex]::Match($sessionTotalStr, '(\d+)h(\d+)m(\d+)s')
-              if ($durMatch.Success) {
-                $sessionTotalSecs = [int]$durMatch.Groups[1].Value * 3600 + [int]$durMatch.Groups[2].Value * 60 + [int]$durMatch.Groups[3].Value
-              } else {
-                $sessionTotalSecs = 5 * 3600 + 20 * 60
-              }
-              $remainingSessionSecs = [Math]::Max(60, $sessionTotalSecs - $elapsed)
-              $remainingMins = [Math]::Floor($remainingSessionSecs / 60)
-              $remainingSecs2 = $remainingSessionSecs % 60
-              $env:SESSION_DURATION = "${remainingMins}m${remainingSecs2}s"
-              Write-Host "[INFO] Restarting DVR with SESSION_DURATION=$env:SESSION_DURATION"
-              $dvrProcess = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
-              $env:SESSION_DURATION = ""
+
+            if ($dvr.HasExited) {
+              Write-Host "[WARN] DVR exited (code: $($dvr.ExitCode)) - restarting..."
+              $env:SESSION_DURATION = [Math]::Max(1, [math]::Floor((5*3600+20*60 - $elapsed)/60)) + "m0s"
+              $dvr = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
             }
-            
-            # Restart cloudflared if it crashed
-            if ($tunnelProc -and $tunnelProc.HasExited) {
-              Write-Host "[WARNING] cloudflared exited - restarting..."
-              $cloudflaredStderr = "$repoDir\cloudflared-stderr.log"
-              if (Test-Path $cloudflaredStderr) { Remove-Item $cloudflaredStderr -Force }
-              $tunnelProc = Start-Process -FilePath $cloudflaredPath -ArgumentList "tunnel --url http://localhost:8080 --protocol http2" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardError $cloudflaredStderr -PassThru
-              # Re-read tunnel URL from stderr after restart
+            if ($tun -and $tun.HasExited) {
+              Write-Host "[WARN] Tunnel exited - restarting..."
+              $stderr = "$repoDir\tunnel-stderr.log"; if (Test-Path $stderr) { Remove-Item $stderr -Force }
+              $tun = Start-Process -FilePath $cloudflaredPath -ArgumentList "tunnel --url http://localhost:8080 --protocol http2" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardError $stderr -PassThru
               Start-Sleep -Seconds 10
-              if (Test-Path $cloudflaredStderr) {
-                $errContent = Get-Content $cloudflaredStderr -Raw -ErrorAction SilentlyContinue
-                $urlMatch = [regex]::Match($errContent, 'https://[a-z0-9\-]+\.trycloudflare\.com')
-                if ($urlMatch.Success) {
-                  $tunnelUrl = $urlMatch.Value
-                  $tunnelUrl | Set-Content -Path $tunnelUrlFile -Force
-                  Write-Host "[OK] New tunnel URL: $tunnelUrl"
-                  # URL changed on reconnect - re-report so admin panel stays current
-                  Report-TunnelUrl $tunnelUrl
-                }
-              }
+              if (Test-Path $stderr) { $c = Get-Content $stderr -Raw; $m = [regex]::Match($c, 'https://[a-z0-9\-]+\.trycloudflare\.com'); if ($m.Success) { $tunnelUrl = $m.Value; $tunnelUrl | Set-Content $tunnelUrlFile -Force } }
             }
-            
-            $status = if ($tunnelUrl) { " | PUBLIC: $tunnelUrl" } else { "" }
-            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Tailscale: $env:TAILSCALE_IP$status (Elapsed: $([Math]::Round($elapsed/60, 1))m, Remaining: $([Math]::Round($remaining/60, 1))m)"
-            
+
+            $pub = if ($tunnelUrl) { " | PUBLIC: $tunnelUrl" } else { "" }
+            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $env:TAILSCALE_IP$pub (Elapsed: $([Math]::Round($elapsed/60,1))m)"
             Start-Sleep -Seconds $sleepSecs
           }
-          
-          # ====== WAIT FOR UPLOADS TO COMPLETE ======
-          Write-Host "Keep-alive loop ended. Waiting for DVR to finish all uploads..."
-          $waitStart = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-          $maxWaitSecs = 240  # wait up to 4 minutes (leaves ~1 min buffer before 6h limit)
-          while (-not (Test-Path $uploadFlag)) {
-            $waited = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $waitStart
-            if ($waited -ge $maxWaitSecs) {
-              Write-Host ("[WARNING] Upload wait timeout ($maxWaitSecs s) - proceeding anyway. Some uploads may still be in progress.")
-              break
-            }
-            Write-Host ("[{0}] Waiting for upload-complete.flag... ({1} s elapsed)" -f (Get-Date -Format 'HH:mm:ss'), $waited)
-            Start-Sleep -Seconds 15
-          }
-          if (Test-Path $uploadFlag) {
-            Write-Host "[OK] DVR finished all upload processing. Check dvr-output.log for per-file results."
-            Remove-Item $uploadFlag -Force -ErrorAction SilentlyContinue
-          }
 
-          Write-Host "Session timeout reached - triggering next workflow run..."
-          $branch = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "main" }
-          gh workflow run secure-rdp.yml --repo $env:GITHUB_REPOSITORY --ref $branch
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "[OK] Next workflow triggered"
-          } else {
-            Write-Host "[WARNING] Failed to auto-trigger. Cron schedule will handle it."
-          }
-          Write-Host "NOTE: DVR and Cloudflare tunnel will continue running via scheduled tasks"
-          exit 0
+          # Wait for uploads
+          $waitStart = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          while (-not (Test-Path $uploadFlag) -and ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $waitStart) -lt 240) { Start-Sleep -Seconds 15 }
+          if (Test-Path $uploadFlag) { Remove-Item $uploadFlag -Force }
+
+          # Trigger next run
+          gh workflow run secure-rdp.yml --repo $env:GITHUB_REPOSITORY --ref $env:GITHUB_REF_NAME
+          Write-Host "Session complete. Next workflow triggered."
