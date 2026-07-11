@@ -14,24 +14,43 @@ import (
 
 const scraplingScript = `"""Grab cookies from chaturbate.com using Scrapling's StealthyFetcher."""
 import json,sys,os,logging
-logging.getLogger().setLevel(logging.CRITICAL)
+logging.basicConfig(level=logging.INFO, format="[COOKIE] %(message)s")
+log=logging.getLogger()
+log.info("=== Cookie Grabber Started ===")
+log.info("Proxy: %s", sys.argv[1] if len(sys.argv)>1 else "none")
 from scrapling.fetchers import StealthyFetcher
 proxy=sys.argv[1] if len(sys.argv)>1 else None
-try:
- resp=StealthyFetcher.fetch("https://chaturbate.com",headless=True,network_idle=True,solve_cloudflare=True,timeout=90000,proxy=proxy,load_dom=True)
- cookies={}
- if isinstance(resp.cookies,tuple):
-  for c in resp.cookies:
-   if isinstance(c,dict)and"name"in c:
-    cookies[c["name"]]=c["value"]
-   elif isinstance(c,dict):
-    cookies.update(c)
- elif isinstance(resp.cookies,dict):
-  cookies=dict(resp.cookies)
- print(json.dumps({"success":True,"cookies":cookies,"status":resp.status}))
-except Exception as e:
- print(json.dumps({"success":False,"error":str(e)}))
- sys.exit(1)
+log.info("Launching headless browser...")
+resp=StealthyFetcher.fetch(
+ "https://chaturbate.com",
+ headless=True,
+ disable_resources=True,
+ network_idle=False,
+ solve_cloudflare=True,
+ timeout=120000,
+ proxy=proxy,
+ load_dom=False,
+ block_webrtc=True,
+ retries=3,
+ retry_delay=2
+)
+log.info("Page loaded (HTTP %d), extracting cookies...", resp.status)
+cookies={}
+if isinstance(resp.cookies,tuple):
+ for c in resp.cookies:
+  if isinstance(c,dict)and"name"in c:
+   cookies[c["name"]]=c["value"]
+  elif isinstance(c,dict):
+   cookies.update(c)
+elif isinstance(resp.cookies,dict):
+ cookies=dict(resp.cookies)
+log.info("Got %d cookies", len(cookies))
+if "cf_clearance" in cookies:
+ log.info("cf_clearance found! length=%d", len(cookies["cf_clearance"]))
+else:
+ log.warning("No cf_clearance cookie!")
+print(json.dumps({"success":True,"cookies":cookies,"status":resp.status}))
+log.info("=== Cookie Grabber Complete ===")
 `
 
 const scraplingTimeout = 120 * time.Second
