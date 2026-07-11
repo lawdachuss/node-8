@@ -302,14 +302,20 @@ func (m *MultiHostUploader) initHosts() {
 		if m.hosts != nil {
 			return
 		}
-		upCount, doCount := -1, -1
+		swCount, vhCount, upCount, doCount := -1, -1, -1, -1
+		if m.streamwish != nil {
+			swCount = m.streamwish.keys.count()
+		}
+		if m.vidhide != nil {
+			vhCount = m.vidhide.keys.count()
+		}
 		if m.upnshare != nil {
 			upCount = m.upnshare.keys.count()
 		}
 		if m.doodstream != nil {
 			doCount = m.doodstream.keys.count()
 		}
-		fmt.Printf("[UPLOADER] initHosts: upnshare keys=%d doodstream keys=%d\n", upCount, doCount)
+		fmt.Printf("[UPLOADER] initHosts: streamwish=%d vidhide=%d upnshare=%d doodstream=%d\n", swCount, vhCount, upCount, doCount)
 		m.hosts = map[string]uploaderFunc{}
 		m.hosts["GoFile"] = m.gofile.UploadWithProgress
 		if m.voesx != nil && m.voesx.apiKey != "" {

@@ -395,7 +395,9 @@ func start(c *cli.Context) error {
 		return fmt.Errorf("new config: %w", err)
 	}
 	fmt.Printf("[startup] config loaded in %v\n", time.Since(started).Round(time.Millisecond))
-	fmt.Printf("[startup] doodstream keys=%q upnshare keys=%q\n", server.Config.DoodStreamAPIKeys, server.Config.UpnshareKeys)
+	fmt.Printf("[startup] upload keys — streamwish=%d vidhide=%d upnshare=%d doodstream=%d\n",
+		len(server.Config.StreamWishAPIKeys), len(server.Config.VidHideAPIKeys),
+		len(server.Config.UpnshareKeys), len(server.Config.DoodStreamAPIKeys))
 
 	// Load cookies from Supabase if available (overrides .env)
 	if server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
