@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -188,7 +189,7 @@ func (ch *Channel) processPendingFile(pf pendingFile) {
 	// Single-stream file — move to output dir (triggers preview + upload).
 	if _, err := os.Stat(videoPath); err == nil {
 		if ch.Config.Compress {
-			normalized, normErr := normalizeFMP4Timestamps(videoPath)
+			normalized, normErr := normalizeFMP4Timestamps(videoPath, func(msg string) { ch.Info("normalize: %s", msg) })
 			if normErr != nil {
 				ch.Warn("normalize: could not reset timestamps for %s: %v — uploading with original timestamps", filepath.Base(videoPath), normErr)
 			}
@@ -198,7 +199,7 @@ func (ch *Channel) processPendingFile(pf pendingFile) {
 			ch.CompressFile(normalized)
 			return
 		} else {
-			normalized, normErr := normalizeFMP4Timestamps(videoPath)
+			normalized, normErr := normalizeFMP4Timestamps(videoPath, func(msg string) { ch.Info("normalize: %s", msg) })
 			if normErr != nil {
 				ch.Warn("normalize: could not reset timestamps for %s: %v — uploading with original timestamps", filepath.Base(videoPath), normErr)
 			}
@@ -224,7 +225,7 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string, skipMinDur
 			return
 		}
 		ch.Info("mux: video track missing; preserving audio-only file %s", filepath.Base(audioPath))
-		normalized, normErr := normalizeFMP4Timestamps(audioPath)
+		normalized, normErr := normalizeFMP4Timestamps(audioPath, func(msg string) { ch.Info("normalize: %s", msg) })
 		if normErr != nil {
 			ch.Warn("normalize: could not reset timestamps for %s: %v — uploading with original timestamps", filepath.Base(audioPath), normErr)
 		}
@@ -244,7 +245,7 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string, skipMinDur
 			return
 		}
 		ch.Info("mux: audio track missing; preserving video-only file %s", filepath.Base(videoPath))
-		normalized, normErr := normalizeFMP4Timestamps(videoPath)
+		normalized, normErr := normalizeFMP4Timestamps(videoPath, func(msg string) { ch.Info("normalize: %s", msg) })
 		if normErr != nil {
 			ch.Warn("normalize: could not reset timestamps for %s: %v — uploading with original timestamps", filepath.Base(videoPath), normErr)
 		}
@@ -286,7 +287,7 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string, skipMinDur
 	ch.Info("delete: removed sidecar %s", filepath.Base(audioPath))
 
 	if ch.Config.Compress {
-		normalized, normErr := normalizeFMP4Timestamps(finalOutput)
+		normalized, normErr := normalizeFMP4Timestamps(finalOutput, func(msg string) { ch.Info("normalize: %s", msg) })
 		if normErr != nil {
 			ch.Warn("normalize: could not reset timestamps on muxed output %s: %v — uploading with original timestamps", filepath.Base(finalOutput), normErr)
 		}
@@ -295,7 +296,7 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string, skipMinDur
 		}
 		ch.CompressFile(normalized)
 	} else {
-		normalized, normErr := normalizeFMP4Timestamps(finalOutput)
+		normalized, normErr := normalizeFMP4Timestamps(finalOutput, func(msg string) { ch.Info("normalize: %s", msg) })
 		if normErr != nil {
 			ch.Warn("normalize: could not reset timestamps on muxed output %s: %v — uploading with original timestamps", filepath.Base(finalOutput), normErr)
 		}
@@ -1020,12 +1021,14 @@ func muxVideoAudio(videoPath, audioPath, outputPath string) error {
 // with -movflags +faststart normalises the timestamps and moves the moov atom
 // to the front for immediate playback.  Falls back to a re-encode if stream
 // copy fails (some fragmented MP4 files can't be remuxed with -c copy).
-func normalizeFMP4Timestamps(videoPath string) (string, error) {
+//
+// warn is an optional logger (nil-safe) used to report A/V realignment.
+func normalizeFMP4Timestamps(videoPath string, warn func(string)) (string, error) {
 	tmpPath := videoPath + ".normalized.mp4"
 	ok := false
 
 	// Attempt 1: fast stream-copy remux with -fflags +genpts.
-    func() {
+	func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		config.AcquireFFmpeg()
@@ -1044,36 +1047,159 @@ func normalizeFMP4Timestamps(videoPath string) (string, error) {
 			}
 		}
 	}()
-	if ok {
-		return videoPath, nil
+	if !ok {
+		os.Remove(tmpPath)
+
+		// Attempt 2: re-encode with libx264 to force clean timestamps.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		config.AcquireFFmpeg()
+		defer config.ReleaseFFmpeg()
+		err := config.FFmpegCommandContext(ctx,
+			"-y",
+			"-i", videoPath,
+			"-c:v", "libx264",
+			"-preset", "ultrafast",
+			"-crf", "28",
+			"-c:a", "aac",
+			"-movflags", "+faststart",
+			tmpPath,
+		).Run()
+		if err != nil {
+			os.Remove(tmpPath)
+			return videoPath, fmt.Errorf("normalize fast+reencode both failed: %w", err)
+		}
+		if err := os.Rename(tmpPath, videoPath); err != nil {
+			os.Remove(tmpPath)
+			return videoPath, err
+		}
 	}
 
-	os.Remove(tmpPath)
+	// Remove any residual initial A/V offset so audio and video start together.
+	aligned, aerr := alignAVStart(videoPath, warn)
+	if aerr != nil {
+		// Non-fatal — keep the normalized file as-is.
+		return videoPath, nil
+	}
+	return aligned, nil
+}
 
-	// Attempt 2: re-encode with libx264 to force clean timestamps.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+// probeStreamStartTimes returns the start_time (presentation time of the first
+// packet) for the first video and first audio stream.  A stream with no
+// usable start_time yields -1.
+func probeStreamStartTimes(path string) (videoStart, audioStart float64, err error) {
+	probeCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, perr := config.FFprobeCommandContext(probeCtx,
+		"-v", "error",
+		"-select_streams", "v:0,a:0",
+		"-show_entries", "stream=codec_type,start_time",
+		"-of", "json",
+		path,
+	).Output()
+	if perr != nil {
+		return 0, 0, perr
+	}
+	var p struct {
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			StartTime string `json:"start_time"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &p); err != nil {
+		return 0, 0, err
+	}
+	parse := func(s string) float64 {
+		v, e := strconv.ParseFloat(s, 64)
+		if e != nil {
+			return -1
+		}
+		return v
+	}
+	foundV, foundA := false, false
+	for _, s := range p.Streams {
+		switch s.CodecType {
+		case "video":
+			if !foundV {
+				videoStart = parse(s.StartTime)
+				foundV = true
+			}
+		case "audio":
+			if !foundA {
+				audioStart = parse(s.StartTime)
+				foundA = true
+			}
+		}
+	}
+	if !foundV {
+		return 0, 0, fmt.Errorf("no video stream found")
+	}
+	return videoStart, audioStart, nil
+}
+
+// alignAVStart removes a residual constant offset between the audio and video
+// tracks so both begin at the same presentation time.
+//
+// Why this is needed: LL-HLS recorders (incl. this one) start the separate
+// audio playlist a fraction of a second — or, on the very first poll of a live
+// stream, several seconds — after the video playlist.  MuxAV keeps that real
+// offset via -copyts, and the stream-copy normalize step preserves it (it only
+// shifts the global earliest timestamp to zero).  The result is audio that
+// lags or leads the picture by a fixed amount for the entire recording.
+//
+// The fix shifts the audio track (only) to start at the video's start time
+// using -itsoffset, which runs at the demuxer so it is a stream-copy operation
+// — no re-encode, so video quality is untouched.  Offsets smaller than the
+// threshold are left alone as they are imperceptible.
+func alignAVStart(path string, warn func(string)) (string, error) {
+	vStart, aStart, err := probeStreamStartTimes(path)
+	if err != nil {
+		return path, nil // can't measure — leave as-is
+	}
+	if aStart < 0 {
+		return path, nil // no audio stream — nothing to align
+	}
+	if vStart < 0 {
+		return path, nil // can't establish reference — skip
+	}
+
+	offset := aStart - vStart
+	const threshold = 0.05
+	if math.Abs(offset) < threshold {
+		return path, nil // already aligned within perception threshold
+	}
+	if warn != nil {
+		warn(fmt.Sprintf("audio/video start offset %.3fs detected; realigning audio to video start", offset))
+	}
+
+	// Feed the file twice: input 0 is video (no shift), input 1 is audio shifted
+	// by -offset so audio now begins at the video's start time.
+	tmpPath := path + ".aligned.mp4"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	config.AcquireFFmpeg()
 	defer config.ReleaseFFmpeg()
-	err := config.FFmpegCommandContext(ctx,
+	shift := -offset
+	err = config.FFmpegCommandContext(ctx,
 		"-y",
-		"-i", videoPath,
-		"-c:v", "libx264",
-		"-preset", "ultrafast",
-		"-crf", "28",
-		"-c:a", "aac",
+		"-i", path,
+		"-itsoffset", fmt.Sprintf("%f", shift),
+		"-i", path,
+		"-map", "0:v:0?",
+		"-map", "1:a:0?",
+		"-c", "copy",
 		"-movflags", "+faststart",
 		tmpPath,
 	).Run()
 	if err != nil {
 		os.Remove(tmpPath)
-		return videoPath, fmt.Errorf("normalize fast+reencode both failed: %w", err)
+		return path, nil // best-effort — keep original
 	}
-	if err := os.Rename(tmpPath, videoPath); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
-		return videoPath, err
+		return path, nil
 	}
-	return videoPath, nil
+	return path, nil
 }
 
 // dateSeparatorRe matches the "_YYYY-MM-DD_" / "_YYYY-MM-DD-" timestamp separator
@@ -1663,6 +1789,10 @@ func mergeVideos(inputs []string, outputPath string) error {
 			if rErr := os.Rename(tmpPath, outputPath); rErr != nil {
 				os.Remove(tmpPath)
 			}
+			if _, aerr := alignAVStart(outputPath, func(msg string) { log.Printf("merge: %s", msg) }); aerr != nil {
+				// best-effort safety net — keep the concatenated output as-is
+				_ = aerr
+			}
 			return nil
 		}
 	}
@@ -1695,6 +1825,11 @@ func mergeVideos(inputs []string, outputPath string) error {
 	if err := config.FFmpegCommandContext(ctx, reEncodeArgs...).Run(); err != nil {
 		os.Remove(outputPath)
 		return fmt.Errorf("merge re-encode: %w", err)
+	}
+
+	if _, aerr := alignAVStart(outputPath, func(msg string) { log.Printf("merge: %s", msg) }); aerr != nil {
+		// best-effort safety net — keep the concatenated output as-is
+		_ = aerr
 	}
 
 	return nil
