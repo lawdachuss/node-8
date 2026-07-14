@@ -24,8 +24,9 @@ const (
 	spriteFrameW    = 640
 	spriteFrameH    = 360
 	previewWidth    = 320
-	previewDuration = 6.0 // seconds
-	previewSegments = 12  // number of smooth clips to stitch (each ~0.5s)
+	previewHeight   = 180 // 16:9 of previewWidth — fixed so concat never fails on aspect drift
+	previewDuration = 18.0 // total seconds of the stitched montage
+	previewSegments = 12   // number of smooth clips to stitch (each ~1.5s)
 )
 
 // generateThumbnail is the channel-scoped wrapper — logs go to the channel log.
@@ -61,15 +62,20 @@ func GenerateThumbnailForFile(videoPath string) (thumbURL, spriteURL, previewURL
 //   - Smooth native-framerate playback (GIF was variable ~1-8fps)
 //   - Catbox accepts MP4 files (free, permanent, CDN-backed)
 //
-// The preview uses filter_complex to extract 12 short clips (~0.5s each)
-// from evenly-spaced points across the full video and stitch them together.
+// The preview uses filter_complex to extract 12 short clips (~1.5s each)
+// spanning the full duration — anchored at the start and end of the stream
+// with the rest evenly spaced 0%..100% — and stitches them together.
 // Each clip has consecutive frames for fully smooth motion, unlike a
 // frame-sampled timelapse where every frame is a jarring jump.
 //
 // Thumbnail, sprite, and preview run in parallel with independent timeouts:
 //   - thumbnail: 5 min  (single-frame seek)
-//   - sprite:    15 min (seeks through full video for long recordings)
-//   - preview:   15 min (12× trim + stitch, H.264 encode)
+//   - sprite:    15 min (16 input seeks — instant per frame, not full decode)
+//   - preview:   15 min (12 input seeks × 1.5s clip, not full decode)
+//
+// All three use input seeking (-ss before -i) so ffmpeg jumps to the target
+// time and reads only what it needs — a 1-hour recording no longer requires
+// decoding the whole file just to make a thumbnail.
 //
 // Using separate contexts prevents one task from being killed prematurely
 // when a long video causes another to exceed a shared short timeout.
@@ -150,6 +156,14 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		}
 	}
 
+	// Probe the first-frame PTS offset once so the sprite/preview fast paths
+	// can seek correctly in inputs that carry absolute timestamps (LL-HLS fMP4).
+	// Without it, -ss would seek into the file's real timeline incorrectly.
+	var ptsOffset float64
+	if dur > 0 {
+		ptsOffset = probeFirstPTSOffset(videoPath)
+	}
+
 	thumbDone := make(chan string, 1)
 	spriteDone := make(chan string, 1)
 	previewDone := make(chan string, 1)
@@ -194,10 +208,34 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			thumbJPG,
 		)
 
-		if err != nil {
-			errFn("thumb: failed for %s: %v (ffmpeg: %s)", baseName, err, stderr)
-			thumbDone <- ""
-			return
+		// Fallback: if the initial seek missed (very short clips, or an
+		// unknown duration that fell back to a fixed 00:00:03 seek beyond the
+		// end of the file), grab the first available frame instead.
+		if err != nil || !fileExists(thumbJPG) {
+			if err != nil {
+				errFn("thumb: seek failed for %s: %v (ffmpeg: %s) — trying first-frame fallback", baseName, err, stderr)
+			} else {
+				errFn("thumb: seek produced no output for %s — trying first-frame fallback", baseName)
+			}
+			fbCtx, fbCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer fbCancel()
+			_, fbErr := runFFmpeg(fbCtx,
+				"-y",
+				"-ss", "0",
+				"-i", videoPath,
+				"-vframes", "1",
+				"-vf", fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2",
+					thumbWidth, thumbHeight, thumbWidth, thumbHeight),
+				"-c:v", "mjpeg",
+				"-q:v", "5",
+				"-update", "1",
+				thumbJPG,
+			)
+			if fbErr != nil {
+				errFn("thumb: fallback also failed for %s: %v", baseName, fbErr)
+				thumbDone <- ""
+				return
+			}
 		}
 
 		imgUploader := uploader.NewMultiImageUploader()
@@ -215,10 +253,10 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 	// (spriteCols*spriteFrameW) × (spriteRows*spriteFrameH) = 2560×1440.
 	// Using 640×360 frames so HiDPI/Retina displays get sharp previews.
 	//
-	// Independent 15-minute context: for long recordings (1 h+), ffmpeg must
-	// seek to 16 evenly-spaced positions, which can take several minutes on a
-	// slow or resource-constrained host.  A short shared context would cause
-	// SIGKILL ("signal: killed") and silently skip sprite generation.
+	// Uses input seeking (-ss before -i): ffmpeg jumps to each of the 16
+	// evenly-spaced positions and reads a single frame, so generation is
+	// O(frames) not O(video_duration).  The 15-minute context is a generous
+	// ceiling for very slow/resource-constrained hosts, not a typical cost.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -235,46 +273,73 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		spriteJPG := videoPath + ".sprite.jpg"
 		defer os.Remove(spriteJPG)
 
-		// fps=1/INTERVAL extracts one frame per interval.
-		// scale with lanczos gives sharper results than the default bilinear.
-		// pad keeps each tile at exactly spriteFrameW×spriteFrameH.
-		// tile=COLSxROWS assembles them into the contact sheet.
-		vf := fmt.Sprintf(
-			"fps=1/%.4f,scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,tile=%dx%d",
-			interval,
-			spriteFrameW, spriteFrameH,
-			spriteFrameW, spriteFrameH,
-			spriteCols, spriteRows,
-		)
-
+		// Fast path: seek to spriteFrames evenly-spaced points via input
+		// seeking (-ss before -i) instead of decoding the whole file.  For a
+		// 1-hour recording this turns a full-file decode into spriteFrames
+		// instant seeks, dropping generation from minutes to seconds.
 		config.AcquireFFmpeg()
 		defer config.ReleaseFFmpeg()
-		stderr, err := runFFmpeg(spriteCtx,
-			"-y",
-			"-i", videoPath,
-			"-vf", vf,
-			"-frames:v", "1",
-			"-c:v", "mjpeg",
-			"-q:v", "5",
-			"-update", "1",
-			spriteJPG,
-		)
 
-		// Fallback: if the 4×4 contact-sheet filter fails (e.g. very short or
-		// atypical source where the tile filter can't gather enough frames),
-		// fall back to a single representative frame so sprite generation still
-		// yields a usable image instead of silently dropping.
+		var stderr string
+		var err error
+		if dur > 0 {
+			args := []string{"-y"}
+			for i := 0; i < spriteFrames; i++ {
+				t := (float64(i) + 0.5) / float64(spriteFrames) * dur
+				if t > dur-0.04 {
+					t = dur - 0.04
+				}
+				if t < 0 {
+					t = 0
+				}
+				args = append(args, "-ss", fmt.Sprintf("%.3f", ptsOffset+t), "-i", videoPath)
+			}
+			var fp []string
+			for i := 0; i < spriteFrames; i++ {
+				fp = append(fp, fmt.Sprintf("[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2[s%d]",
+					i, spriteFrameW, spriteFrameH, spriteFrameW, spriteFrameH, i))
+			}
+			var tileIns []string
+			for i := 0; i < spriteFrames; i++ {
+				tileIns = append(tileIns, fmt.Sprintf("[s%d]", i))
+			}
+			fp = append(fp, fmt.Sprintf("%s%s", strings.Join(tileIns, ""), fmt.Sprintf("tile=%dx%d", spriteCols, spriteRows)))
+			args = append(args, "-filter_complex", strings.Join(fp, ";"), "-frames:v", "1", "-q:v", "5", spriteJPG)
+			stderr, err = runFFmpeg(spriteCtx, args...)
+		} else {
+			// Duration unknown: fall back to sequential fps extraction.
+			vf := fmt.Sprintf(
+				"fps=1/%.4f,scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,tile=%dx%d",
+				interval,
+				spriteFrameW, spriteFrameH,
+				spriteFrameW, spriteFrameH,
+				spriteCols, spriteRows,
+			)
+			stderr, err = runFFmpeg(spriteCtx,
+				"-y",
+				"-i", videoPath,
+				"-vf", vf,
+				"-frames:v", "1",
+				"-c:v", "mjpeg",
+				"-q:v", "5",
+				"-update", "1",
+				spriteJPG,
+			)
+		}
+
+		// Fallback: if the contact sheet fails, fall back to a single
+		// representative frame so sprite generation still yields a usable image.
 		if err != nil || !fileExists(spriteJPG) {
 			if err != nil {
-				errFn("sprite: tile filter failed for %s: %v (ffmpeg: %s) — trying single-frame fallback", baseName, err, stderr)
+				errFn("sprite: sheet failed for %s: %v (ffmpeg: %s) — trying single-frame fallback", baseName, err, stderr)
 			} else {
-				errFn("sprite: tile filter produced no output for %s — trying single-frame fallback", baseName)
+				errFn("sprite: sheet produced no output for %s — trying single-frame fallback", baseName)
 			}
 			fbCtx, fbCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer fbCancel()
 			_, fbErr := runFFmpeg(fbCtx,
 				"-y",
-				"-ss", fmt.Sprintf("%.2f", dur*0.1),
+				"-ss", fmt.Sprintf("%.2f", ptsOffset+dur*0.1),
 				"-i", videoPath,
 				"-vframes", "1",
 				"-vf", fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2",
@@ -301,7 +366,7 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		}
 	}()
 
-	// ── MP4 hover preview (smooth clips from across the video, 6s total) ──
+	// ── MP4 hover preview (smooth clips from across the video, 18s total) ──
 	// H.264 MP4 is used instead of GIF because:
 	//   - ~90% smaller file size for the same visual quality
 	//   - Full 24-bit color (vs 256-color palette in GIF)
@@ -309,13 +374,15 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 	//   - Catbox accepts MP4 files (200MB limit, permanent storage)
 	//
 	// Instead of isolated frame sampling (which produces a jerky slideshow),
-	// we extract 12 short continuous clips (~0.5s each) from evenly-spaced
-	// points across the video and stitch them together.  Each clip has fully
-	// smooth motion because frames within it are consecutive.
+	// we extract 12 short continuous clips (~1.5s each) spanning the FULL
+	// duration — anchored at the very start (i=0) and very end (i=n-1) so the
+	// beginning and end of the stream are always included, with the rest
+	// evenly spaced 0%..100%.  Each clip has fully smooth motion because the
+	// frames within it are consecutive.
 	//
-	//   <6 sec:  no segmenting, plays whole video at normal speed
-	//   1 min:   12 clips × 0.5s = 6s (5s between clips)
-	//   60 min:  12 clips × 0.5s = 6s (5 min between clips)
+	//   <18 sec: no segmenting, plays whole video at normal speed
+	//   1 min:   12 clips × 1.5s = 18s (4.5s between clips)
+	//   60 min:  12 clips × 1.5s = 18s (5 min between clips)
 	//
 	// Uploaded to Catbox.moe (free, permanent, CDN-backed) with LobFile as fallback.
 	go func() {
@@ -349,12 +416,30 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			return false
 		}
 
-		// generatePreview runs ffmpeg with filter_complex + simple fallback.
-		// Returns true if the preview file was successfully created.
+		// generatePreview runs ffmpeg with input-seek + concat filter_complex
+		// (or a simple single-segment fallback).  Returns true if the preview
+		// file was successfully created.
 		generatePreview := func(ctx context.Context) bool {
 			var err error
 			var stderr string
-			if dur <= previewDuration || dur <= 0 {
+			if dur <= 0 {
+				// Duration unknown (probe failed). Encoding the whole file as
+				// the preview would produce a multi-GB clip for long videos, so
+				// cap to the first previewDuration seconds from the start.
+				stderr, err = runFFmpeg(ctx,
+					"-y",
+					"-ss", "0",
+					"-i", videoPath,
+					"-t", fmt.Sprintf("%.2f", previewDuration),
+					"-vf", fmt.Sprintf("scale=%d:-2:flags=lanczos", previewWidth),
+					"-c:v", "libx264",
+					"-preset", "ultrafast",
+					"-crf", "28",
+					"-threads", "1",
+					"-an",
+					previewMP4,
+				)
+			} else if dur <= previewDuration {
 				stderr, err = runFFmpeg(ctx,
 					"-y",
 					"-i", videoPath,
@@ -367,69 +452,81 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 					previewMP4,
 				)
 			} else {
-				// Detect PTS offset (e.g. LL-HLS fMP4 segments carry absolute
-				// server timestamps).  trim=start=X uses PTS, so we must adjust.
-				ptsOffset := probeFirstPTSOffset(videoPath)
+				// Fast path: seek to previewSegments clips via input seeking
+				// (-ss/-t before -i) instead of decoding the whole file with
+				// trim.  For a 1-hour recording this cuts decode work from
+				// ~full video to previewSegments×segDuration seconds.
 				segDuration := previewDuration / float64(previewSegments)
-				step := dur / float64(previewSegments)
 
-				var filterParts []string
-				var concatInputs []string
-
+				args := []string{"-y"}
 				for i := 0; i < previewSegments; i++ {
-					midpoint := step * (float64(i) + 0.5)
-					start := midpoint - segDuration/2
-
+					var center float64
+					if previewSegments == 1 {
+						center = dur / 2
+					} else {
+						center = (float64(i) / float64(previewSegments-1)) * dur
+					}
+					start := center - segDuration/2
+					if start < 0 {
+						start = 0
+					}
 					if start+segDuration > dur {
 						start = dur - segDuration
 					}
 					if start < 0 {
 						start = 0
 					}
-
-					label := fmt.Sprintf("v%d", i)
-					filterParts = append(filterParts, fmt.Sprintf(
-						"[0:v]trim=start=%.3f:duration=%.3f,setpts=PTS-STARTPTS,scale=%d:-2:flags=lanczos[%s]",
-						ptsOffset+start, segDuration, previewWidth, label,
-					))
-					concatInputs = append(concatInputs, fmt.Sprintf("[%s]", label))
+					args = append(args, "-ss", fmt.Sprintf("%.3f", ptsOffset+start), "-t", fmt.Sprintf("%.3f", segDuration), "-i", videoPath)
 				}
 
-				filterComplex := strings.Join(filterParts, ";") + ";" +
-					strings.Join(concatInputs, "") +
-					fmt.Sprintf("concat=n=%d:v=1:a=0[out]", previewSegments)
+				// Concatenate the raw clips first (no scaling per segment),
+				// then scale the whole 18s montage once — avoids 11 redundant
+				// scale passes.  Encode with ultrafast + single thread + no
+				// faststart: at 320×180 the frame is tiny, so libx264 thread
+				// spin-up dominates; a single thread is actually faster here,
+				// and faststart only helps playback start, not generation time.
+				var fp []string
+				for i := 0; i < previewSegments; i++ {
+					fp = append(fp, fmt.Sprintf("[%d:v]setpts=PTS-STARTPTS[v%d]", i, i))
+				}
+				var concatIns []string
+				for i := 0; i < previewSegments; i++ {
+					concatIns = append(concatIns, fmt.Sprintf("[v%d]", i))
+				}
+				fp = append(fp, fmt.Sprintf("%s%s", strings.Join(concatIns, ""),
+					fmt.Sprintf("concat=n=%d:v=1:a=0,scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2[out]",
+						previewSegments, previewWidth, previewHeight, previewWidth, previewHeight)))
 
-				stderr, err = runFFmpeg(ctx,
-					"-y",
-					"-i", videoPath,
-					"-filter_complex", filterComplex,
+				args = append(args,
+					"-filter_complex", strings.Join(fp, ";"),
 					"-map", "[out]",
 					"-c:v", "libx264",
-					"-preset", "fast",
-					"-crf", "23",
-					"-movflags", "+faststart",
+					"-preset", "ultrafast",
+					"-crf", "28",
+					"-threads", "1",
 					"-an",
 					previewMP4,
 				)
+				stderr, err = runFFmpeg(ctx, args...)
 
 				if err != nil || !fileExists(previewMP4) {
 					if err != nil {
-						errFn("preview: complex filter failed for %s: %v (ffmpeg: %s), trying simple fallback", baseName, err, stderr)
+						errFn("preview: seek-concat failed for %s: %v (ffmpeg: %s), trying simple fallback", baseName, err, stderr)
 					} else {
-						errFn("preview: complex filter produced no output for %s, trying simple fallback", baseName)
+						errFn("preview: seek-concat produced no output for %s, trying simple fallback", baseName)
 					}
 					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 					defer fallbackCancel()
 					stderr, err = runFFmpeg(fallbackCtx,
 						"-y",
-						"-ss", fmt.Sprintf("%.2f", dur*0.3),
+						"-ss", fmt.Sprintf("%.2f", ptsOffset+dur*0.3),
 						"-i", videoPath,
 						"-t", fmt.Sprintf("%.2f", previewDuration),
 						"-vf", fmt.Sprintf("scale=%d:-2:flags=lanczos", previewWidth),
 						"-c:v", "libx264",
-						"-preset", "fast",
-						"-crf", "23",
-						"-movflags", "+faststart",
+						"-preset", "ultrafast",
+						"-crf", "28",
+						"-threads", "1",
 						"-an",
 						previewMP4,
 					)
