@@ -699,6 +699,22 @@ func closeTrackedFile(file *os.File) (string, os.FileInfo, error) {
 	return filename, fileInfo, nil
 }
 
+// moveToPendingDir moves a file into the .pending/<username>/ directory.
+// Acquires pendingDirMu so it cannot race with handleMinDurationAndMerge,
+// which may call deletePendingSegments concurrently.
+func moveToPendingDir(filePath, username string) error {
+	mu := pendingMu(username)
+	mu.Lock()
+	defer mu.Unlock()
+
+	pendingDir := pendingSegmentsDir(username)
+	if err := os.MkdirAll(pendingDir, 0777); err != nil {
+		return fmt.Errorf("create pending dir: %w", err)
+	}
+	dest := filepath.Join(pendingDir, filepath.Base(filePath))
+	return os.Rename(filePath, dest)
+}
+
 // maybeDeferToPending checks whether min-duration is enabled and, if so,
 // whether filePath is short enough to be deferred.  When the file should be
 // deferred (or on probe failure — we'd rather be safe) it is moved into
@@ -744,256 +760,6 @@ func MaybeDeferToPending(filePath string) bool {
 	}
 
 	return false // meets threshold — upload normally
-}
-
-// moveToPendingDir moves a file into the .pending/<username>/ directory.
-// Acquires pendingDirMu so it cannot race with handleMinDurationAndMerge or
-// processAllPendingSegments, which may call deletePendingSegments concurrently.
-func moveToPendingDir(filePath, username string) error {
-	mu := pendingMu(username)
-	mu.Lock()
-	defer mu.Unlock()
-
-	pendingDir := pendingSegmentsDir(username)
-	if err := os.MkdirAll(pendingDir, 0777); err != nil {
-		return fmt.Errorf("create pending dir: %w", err)
-	}
-	dest := filepath.Join(pendingDir, filepath.Base(filePath))
-	return os.Rename(filePath, dest)
-}
-
-// CleanupOrphanedFiles processes orphaned sidecar files left behind by
-// cancelled or crashed post-processing runs. Instead of deleting them,
-// it runs them through the full pipeline: mux (if split A/V), generate
-// thumbnails, upload to hosts, save metadata to Supabase, then delete.
-func CleanupOrphanedFiles() {
-	if server.Config == nil {
-		return
-	}
-
-	dirs := []string{"videos"}
-	if server.Config.OutputDir != "" {
-		dirs = append(dirs, server.Config.OutputDir)
-	}
-
-	// Files that still have an in-progress (non-Done) pipeline state are owned
-	// by the pipeline. The orphan scanner must not delete or re-upload them —
-	// doing so would drop an already-uploaded recording whose metadata save is
-	// still pending (e.g. during a DB partition), or race the pipeline.
-	owned := map[string]bool{}
-	if states, stErr := server.LoadAllPipelineStates(); stErr == nil {
-		for _, s := range states {
-			if s.CurrentStage != StageDone.String() && s.FilePath != "" {
-				owned[s.FilePath] = true
-			}
-		}
-	}
-
-	for _, dir := range dirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-
-		// Classify files by type
-		type fileInfo struct {
-			path string
-			name string
-		}
-		mainVideos := map[string]fileInfo{} // stem -> info
-		muxedFiles := map[string]fileInfo{} // stem -> info
-		videoParts := map[string]fileInfo{} // stem -> info (.video.mp4)
-		audioParts := map[string]fileInfo{} // stem -> info (.audio.mp4)
-
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			path := filepath.Join(dir, name)
-			ext := strings.ToLower(filepath.Ext(name))
-
-			switch {
-			case strings.HasSuffix(name, ".video.muxed.mp4"):
-				stem := strings.TrimSuffix(name, ".video.muxed.mp4")
-				muxedFiles[stem] = fileInfo{path, name}
-			case strings.HasSuffix(name, ".video.mp4"):
-				stem := strings.TrimSuffix(name, ".video.mp4")
-				videoParts[stem] = fileInfo{path, name}
-			case strings.HasSuffix(name, ".audio.mp4"):
-				stem := strings.TrimSuffix(name, ".audio.mp4")
-				audioParts[stem] = fileInfo{path, name}
-			case (ext == ".mp4" || ext == ".mkv" || ext == ".ts") &&
-				!strings.Contains(name, ".video.") &&
-				!strings.Contains(name, ".audio.") &&
-				!strings.Contains(name, ".muxed.") &&
-				!strings.Contains(name, ".preview."):
-				stem := strings.TrimSuffix(name, filepath.Ext(name))
-				mainVideos[stem] = fileInfo{path, name}
-			}
-		}
-
-		// Process orphaned muxed files (output from a mux that was never uploaded)
-		sem := make(chan struct{}, 5)
-		for stem, info := range muxedFiles {
-			if _, hasMain := mainVideos[stem]; hasMain {
-				continue
-			}
-			stem, info := stem, info
-			sem <- struct{}{}
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("[PANIC] processing orphaned muxed file %s: %v", info.name, r)
-					}
-					<-sem
-				}()
-				recoveryLogf(info.name, "processing orphaned muxed file %s", info.name)
-
-				// Check journal to skip files that were already fully uploaded
-				if IsAlreadyFullyUploaded(info.path) {
-					// A pipeline still owns this file (uploads done, metadata
-					// pending, or in-flight) — leave it for the pipeline to
-					// finish rather than deleting an already-uploaded recording.
-					if owned[info.path] {
-						recoveryLogf(info.name, "has an in-progress pipeline state — leaving local copy for the pipeline")
-						return
-					}
-					recoveryLogf(info.name, "all hosts already have this file per journal — removing local copy")
-					os.Remove(info.path)
-					DeleteSidecarFiles(info.path)
-					_ = stem
-					return
-				}
-
-				// Skip if another routine (watcher/pipeline) is already
-				// uploading this file, and claim it ourselves so the watcher
-				// won't also pick it up (mutual exclusion via the in-flight map).
-				if IsUploadInFlight(info.path) {
-					_ = stem
-					return
-				}
-				MarkUploadInFlight(info.path)
-				defer MarkUploadDone(info.path)
-
-				if MaybeDeferToPending(info.path) {
-					_ = stem
-					return
-				}
-				thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(info.path)
-				UploadOrphanedFile(info.path, thumbURL, spriteURL, previewURL)
-				DeleteSidecarFiles(info.path)
-				_ = stem
-			}()
-		}
-
-		// Process orphaned split A/V pairs (mux them first, then upload)
-		for stem, vInfo := range videoParts {
-			if _, hasMain := mainVideos[stem]; hasMain {
-				continue
-			}
-			aInfo, hasAudio := audioParts[stem]
-			if !hasAudio {
-				// No matching audio sidecar — this video part is stale.
-				// If a muxed result exists for this stem, delete the stale video part.
-				if _, hasMuxed := muxedFiles[stem]; hasMuxed {
-					recoveryLogf(vInfo.name, "recovery: deleting stale video sidecar %s (muxed version exists)", vInfo.name)
-					os.Remove(vInfo.path)
-					continue
-				}
-				// No muxed result either — upload the video part on its own.
-				if !IsUploadInFlight(vInfo.path) && !MaybeDeferToPending(vInfo.path) {
-					MarkUploadInFlight(vInfo.path)
-					thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(vInfo.path)
-					UploadOrphanedFile(vInfo.path, thumbURL, spriteURL, previewURL)
-					MarkUploadDone(vInfo.path)
-				}
-				DeleteSidecarFiles(vInfo.path)
-				continue
-			}
-
-			stem, vInfo, aInfo := stem, vInfo, aInfo
-			sem <- struct{}{}
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("[PANIC] muxing orphaned split A/V pair %s: %v", stem, r)
-					}
-					<-sem
-				}()
-
-				if IsUploadInFlight(vInfo.path) {
-					return
-				}
-				MarkUploadInFlight(vInfo.path)
-				defer MarkUploadDone(vInfo.path)
-
-				// Mux the pair
-				muxedPath := filepath.Join(dir, stem+".video.muxed.mp4")
-				recoveryLogf(vInfo.name, "recovery: muxing orphaned split A/V pair %s", stem)
-				if err := muxVideoAudio(vInfo.path, aInfo.path, muxedPath); err != nil {
-					recoveryLogf(vInfo.name, "recovery: mux failed for %s: %v — uploading video-only", stem, err)
-					// Fall back to uploading just the video track
-					if !MaybeDeferToPending(vInfo.path) {
-						thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(vInfo.path)
-						UploadOrphanedFile(vInfo.path, thumbURL, spriteURL, previewURL)
-					}
-					DeleteSidecarFiles(vInfo.path)
-					return
-				}
-
-				// Delete source sidecars
-				os.Remove(vInfo.path)
-				os.Remove(aInfo.path)
-
-				// Generate thumbnails, upload, and clean up
-				if !MaybeDeferToPending(muxedPath) {
-					MarkUploadInFlight(muxedPath)
-					thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(muxedPath)
-					UploadOrphanedFile(muxedPath, thumbURL, spriteURL, previewURL)
-					MarkUploadDone(muxedPath)
-				}
-				DeleteSidecarFiles(muxedPath)
-				os.Remove(muxedPath)
-			}()
-		}
-
-		// Wait for all orphan processing to complete
-		for i := 0; i < cap(sem); i++ {
-			sem <- struct{}{}
-		}
-
-		// Process any pending segments (short videos awaiting merge).
-		// Pending segments are stored under .pending/{username}/.
-		processAllPendingSegments()
-
-		// Clean up orphaned sidecar files whose main video no longer exists
-		sidecarExts := []string{".thumb.webp", ".thumb.jpg", ".sprite.webp", ".sprite.jpg", ".preview.webp", ".preview.mp4", ".thumb", ".sprite"}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			path := filepath.Join(dir, name)
-			for _, suffix := range sidecarExts {
-				if !strings.HasSuffix(name, suffix) {
-					continue
-				}
-				base := strings.TrimSuffix(name, suffix)
-				hasMain := false
-				for ext := range map[string]bool{".mp4": true, ".mkv": true, ".ts": true} {
-					if _, ok := mainVideos[base+ext]; ok {
-						hasMain = true
-						break
-					}
-				}
-				if !hasMain {
-					os.Remove(path)
-				}
-				break
-			}
-		}
-	}
 }
 
 // DeleteSidecarFiles removes preview sidecar files associated with a video path.
@@ -1042,26 +808,6 @@ func removeFileWithRetry(path string) error {
 		time.Sleep(backoff)
 	}
 	return os.Remove(path) // final attempt, return the error
-}
-
-// muxVideoAudio combines a separate video and audio file into a single MP4.
-// Uses a 5-minute timeout so a hung ffmpeg cannot leak the caller's goroutine.
-func muxVideoAudio(videoPath, audioPath, outputPath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	defer config.AcquireFFmpeg()()
-	cmd := config.FFmpegCommandContext(ctx, "-y",
-		"-i", videoPath,
-		"-i", audioPath,
-		"-map", "0:v?",
-		"-map", "1:a?",
-		"-c", "copy",
-		"-copyts",
-		"-avoid_negative_ts", "make_zero",
-		"-movflags", "+faststart",
-		outputPath,
-	)
-	return cmd.Run()
 }
 
 // normalizeFMP4Timestamps remuxes an fMP4 recording to reset the timeline.
@@ -1649,20 +1395,31 @@ func collectPendingSegments(username string) []string {
 // (a file that was misrouted into this channel's pending directory) is excluded
 // and best-effort relocated to its correct channel's pending dir, so two
 // channels' recordings are never merged into a single file.
+//
+// A segment whose username CANNOT be determined (empty, e.g. a truncated,
+// corrupt, or off-pattern filename) is treated as a stray and routed to the
+// isolated "_unknown" bucket rather than being claimed by whatever channel
+// happens to scan the directory next — claiming it would wrongly merge an
+// unrelated file into the current channel's recording.
 func segmentsForChannel(username string) []string {
 	all := collectPendingSegments(username)
 	var keep, stray []string
 	for _, s := range all {
 		u := extractUsernameFromFilename(filepath.Base(s))
-		if u == "" || u == username {
+		if u == username {
 			keep = append(keep, s)
 		} else {
 			stray = append(stray, s)
 		}
 	}
 	for _, s := range stray {
-		if correct := extractUsernameFromFilename(filepath.Base(s)); correct != "" && correct != username {
+		correct := extractUsernameFromFilename(filepath.Base(s))
+		if correct != "" && correct != username {
 			_ = moveToPendingDir(s, correct)
+		} else {
+			// Unknown/unparseable owner — isolate so it never pollutes a
+			// real channel's merge set.
+			_ = moveToPendingDir(s, "_unknown")
 		}
 	}
 	return keep
@@ -2038,7 +1795,9 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string, skipDefer bool) b
 
 	// If multiple segments have now accumulated, merge them and check the
 	// combined duration. Only upload if the merged result meets the threshold.
-	segments := collectPendingSegments(ch.Config.Username)
+	// Use segmentsForChannel (not collectPendingSegments) so a segment that
+	// belongs to a DIFFERENT channel is never pulled into this merge.
+	segments := segmentsForChannel(ch.Config.Username)
 	if len(segments) > 1 {
 		mergedPath := filepath.Join(pendingDir, "merged-"+filepath.Base(destPath))
 		mergeInputs := make([]string, len(segments))
@@ -2103,121 +1862,6 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string, skipDefer bool) b
 	}
 
 	return true // video was deferred to pending (or merged+uploaded)
-}
-
-// processAllPendingSegments scans all .pending/* subdirectories and processes any
-// accumulated segments.  If segments exist they are merged together and uploaded.
-// This is called during startup orphan cleanup so short segments from a previous
-// run don't stay pending forever when no new recording arrives.
-func processAllPendingSegments() {
-	minDur := 0
-	if server.Config != nil {
-		minDur = server.Config.MinDurationBeforeUpload
-	}
-
-	dirs := []string{"videos"}
-	if server.Config != nil && server.Config.OutputDir != "" && server.Config.OutputDir != "videos" {
-		dirs = append(dirs, server.Config.OutputDir)
-	}
-	for _, dir := range dirs {
-		pendingRoot := filepath.Join(dir, ".pending")
-		userDirs, err := os.ReadDir(pendingRoot)
-		if err != nil {
-			continue
-		}
-		for _, ud := range userDirs {
-			if !ud.IsDir() {
-				continue
-			}
-			username := ud.Name()
-
-			// Never auto-process the isolated "unknown" bucket — its files are
-			// deliberately kept out of any channel's merges/uploads.
-			if username == "_unknown" {
-				continue
-			}
-
-			// Skip if this channel is actively recording — its own
-			// handleMinDurationAndMerge will process pending segments.
-			if server.Manager != nil {
-				active := false
-				for _, ci := range server.Manager.ChannelInfo() {
-					if ci.Username == username {
-						active = true
-						break
-					}
-				}
-				if active {
-					continue
-				}
-			}
-
-			mu := pendingMu(username)
-
-			mu.Lock()
-			segments := segmentsForChannel(username)
-			if len(segments) < 1 {
-				mu.Unlock()
-				continue
-			}
-
-			// If min-duration is disabled, upload everything directly (legacy behavior).
-			if minDur <= 0 {
-				for _, s := range segments {
-					recoveryLogf(s, "recovery: uploading pending segment %s", filepath.Base(s))
-					mu.Unlock()
-					thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(s)
-					UploadOrphanedFile(s, thumbURL, spriteURL, previewURL)
-					_ = os.Remove(s)
-					mu.Lock()
-				}
-				_ = os.Remove(pendingSegmentsDir(username))
-				mu.Unlock()
-				continue
-			}
-
-			// Min-duration is enabled — merge segments and upload (always upload
-			// during orphan cleanup, even if merged result is short).
-			segCopy := make([]string, len(segments))
-			copy(segCopy, segments)
-			mu.Unlock()
-
-			mergedPath := filepath.Join(pendingSegmentsDir(username), "merged-"+filepath.Base(segments[0]))
-			recoveryLogf(segments[0], "recovery: merging %d pending segments for %s", len(segments), username)
-			if err := mergeVideos(segCopy, mergedPath); err != nil {
-				os.Remove(mergedPath)
-				recoveryLogf(segments[0], "recovery: merge failed for %s: %v — uploading individual segments", username, err)
-				for _, s := range segCopy {
-					thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(s)
-					UploadOrphanedFile(s, thumbURL, spriteURL, previewURL)
-					_ = os.Remove(s)
-				}
-				_ = os.Remove(pendingSegmentsDir(username))
-				continue
-			}
-
-			// Minimum duration is enforced even during orphan cleanup: never
-			// upload a merged result below the threshold. If it's too short,
-			// drop the merged file and leave the individual segments pending
-			// so they can accumulate with future recordings.
-			mergedDur, probeErr := VideoDurationSeconds(mergedPath)
-			if probeErr != nil || mergedDur < float64(minDur) {
-				recoveryLogf(mergedPath, "recovery: merged %.1fs (< %ds) — NOT uploading (min-duration enforced); keeping segments pending", mergedDur, minDur)
-				os.Remove(mergedPath)
-				continue
-			}
-
-			mu.Lock()
-			for _, s := range segCopy {
-				os.Remove(s)
-			}
-			mu.Unlock()
-			recoveryLogf(mergedPath, "recovery: merged — uploading")
-			thumbURL, spriteURL, previewURL := GenerateThumbnailForFile(mergedPath)
-			UploadOrphanedFile(mergedPath, thumbURL, spriteURL, previewURL)
-			_ = os.Remove(mergedPath)
-		}
-	}
 }
 
 // ShouldSwitchFile determines whether a new file should be created.

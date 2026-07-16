@@ -12,12 +12,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"net/url"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/teacat/chaturbate-dvr/channel"
 	"github.com/teacat/chaturbate-dvr/config"
 	"github.com/teacat/chaturbate-dvr/database"
 	"github.com/teacat/chaturbate-dvr/coordinator"
@@ -712,7 +712,6 @@ func start(c *cli.Context) error {
 	}
 
 	// else create a channel with the provided username
-	channel.CleanupOrphanedFiles()
 	go server.StartDiskMonitor(diskMonitorStop)
 
 	if err := server.Manager.CreateChannel(&entity.ChannelConfig{

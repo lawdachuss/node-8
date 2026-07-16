@@ -251,19 +251,17 @@ func (m *Manager) LoadConfig() error {
 		fmt.Println("[WARN] channels are running but state changes will be lost if the container restarts")
 	}
 
-	// Clean up orphaned sidecar files from previous interrupted runs
+	// Scan thumbnails for the UI
 	go func() {
-		channel.CleanupOrphanedFiles()
 		m.ScanThumbnails()
 	}()
 
-	// Periodic orphan cleanup + thumbnail scan
+	// Periodic thumbnail scan
 	if server.Config.OrphanCleanupInterval > 0 {
 		go func() {
 			ticker := time.NewTicker(time.Duration(server.Config.OrphanCleanupInterval) * time.Minute)
 			defer ticker.Stop()
 			for range ticker.C {
-				channel.CleanupOrphanedFiles()
 				m.ScanThumbnails()
 			}
 		}()
@@ -349,9 +347,8 @@ func (m *Manager) LoadPooledConfig() error {
 	fmt.Printf("[manager] LoadPooledConfig: loaded %d channel(s) for node %q\n",
 		created, server.NodeID())
 
-	// Cleanup orphans + watcher (same as LoadConfig)
+	// Scan thumbnails (same as LoadConfig)
 	go func() {
-		channel.CleanupOrphanedFiles()
 		m.ScanThumbnails()
 	}()
 
@@ -360,7 +357,6 @@ func (m *Manager) LoadPooledConfig() error {
 			ticker := time.NewTicker(time.Duration(server.Config.OrphanCleanupInterval) * time.Minute)
 			defer ticker.Stop()
 			for range ticker.C {
-				channel.CleanupOrphanedFiles()
 				m.ScanThumbnails()
 			}
 		}()
