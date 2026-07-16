@@ -16,7 +16,11 @@ import (
 const (
 	diskMonitorInterval = 5 * time.Minute // how often to check disk usage
 	diskHysteresis      = 5               // stop auto-deleting when disk drops below critical - hysteresis
+	diskUsageRetention  = 7 * 24 * time.Hour
+	diskUsageTrimEvery  = 24 * time.Hour // trim the disk_usage table at most once per day
 )
+
+var lastDiskUsageTrim time.Time
 
 // StartDiskMonitor begins periodic disk space monitoring in a background
 // goroutine.  It checks disk usage every diskMonitorInterval and:
@@ -60,6 +64,17 @@ func checkDisk() {
 
 	// Save disk usage to Supabase (non-fatal on error)
 	saveDiskUsageToDB(info)
+
+	// Trim the append-only disk_usage table so it doesn't grow unbounded.
+	// Only one node needs to do this; throttle to once per day.
+	if time.Since(lastDiskUsageTrim) > diskUsageTrimEvery {
+		lastDiskUsageTrim = time.Now()
+		if client := GetDBClient(); client != nil {
+			if err := client.TrimDiskUsageOlderThan(diskUsageRetention); err != nil {
+				log.Printf("[DISK] failed to trim disk_usage: %v", err)
+			}
+		}
+	}
 
 	// Check age-based retention: delete local files older than MaxLocalAgeDays
 	if cfg.MaxLocalAgeDays > 0 {

@@ -728,6 +728,15 @@ func (c *Client) GetLatestDiskUsage() (*DiskUsage, error) {
 	return &usages[0], nil
 }
 
+// TrimDiskUsageOlderThan deletes disk_usage rows older than the given retention
+// window. The table is append-only (one row per monitor tick across all nodes)
+// and only the newest row is ever read, so without trimming it grows unbounded
+// and bloats the database.
+func (c *Client) TrimDiskUsageOlderThan(retention time.Duration) error {
+	cutoff := time.Now().Add(-retention).UTC().Format(time.RFC3339)
+	return c.delete(fmt.Sprintf("/disk_usage?recorded_at=lt.%s", url.QueryEscape(cutoff)))
+}
+
 // ============================================================================
 // UPLOAD JOURNAL
 // ============================================================================

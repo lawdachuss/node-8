@@ -41,9 +41,6 @@ DROP TABLE IF EXISTS public.tunnels CASCADE;
 DROP TABLE IF EXISTS public.app_settings CASCADE;
 DROP TABLE IF EXISTS public.channels CASCADE;
 
--- Discard any cached plan / materialized state (no-op if no prepared stmts).
-DISCARD PLANS;
-
 -- ============================================================================
 -- 1. CHANNELS
 -- ============================================================================
@@ -393,47 +390,10 @@ CREATE POLICY "Allow all operations on channel_assignments" ON channel_assignmen
 -- ============================================================================
 -- VIEWS
 -- ============================================================================
-CREATE OR REPLACE VIEW recordings_with_links WITH (security_invoker = true) AS
-SELECT
-    r.*,
-    COALESCE(
-        json_object_agg(ul.host, ul.url) FILTER (WHERE ul.host IS NOT NULL),
-        '{}'::json
-    ) AS links
-FROM recordings r
-LEFT JOIN upload_links ul ON r.id = ul.recording_id
-GROUP BY r.id;
-
-CREATE OR REPLACE VIEW channel_statistics WITH (security_invoker = true) AS
-SELECT
-    c.username,
-    c.is_paused,
-    COUNT(r.id) AS total_recordings,
-    SUM(r.filesize) AS total_filesize_bytes,
-    MAX(r.timestamp) AS last_recording_at,
-    AVG(r.viewers) AS avg_viewers,
-    c.created_at,
-    c.updated_at
-FROM channels c
-LEFT JOIN recordings r ON c.username = r.username
-GROUP BY c.id, c.username, c.is_paused, c.created_at, c.updated_at;
-
-CREATE OR REPLACE VIEW recent_activity WITH (security_invoker = true) AS
-SELECT
-    'recording' AS activity_type,
-    r.username,
-    r.filename AS description,
-    r.timestamp AS activity_time
-FROM recordings r
-UNION ALL
-SELECT
-    'log' AS activity_type,
-    cl.username,
-    cl.message AS description,
-    cl.created_at AS activity_time
-FROM channel_logs cl
-ORDER BY activity_time DESC
-LIMIT 100;
+-- NOTE: recordings_with_links / channel_statistics / recent_activity were
+-- removed. They were never queried by the application (the Go code aggregates
+-- upload_links in LoadRecordingsFromDB instead) yet scanned the full recordings
+-- table on every definition refresh and added RLS/grant/owner overhead.
 
 -- ============================================================================
 -- MULTI-INSTANCE BOOTSTRAP
@@ -527,10 +487,15 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon;
 GRANT EXECUTE ON FUNCTION claim_channels(TEXT, INT) TO anon;
 GRANT EXECUTE ON FUNCTION claim_specific_channel(TEXT, TEXT, TEXT) TO anon;
 
-GRANT SELECT ON public.recordings_with_links TO anon;
-GRANT SELECT ON public.channel_statistics TO anon;
-GRANT SELECT ON public.recent_activity TO anon;
-
-ALTER VIEW public.recordings_with_links OWNER TO anon;
-ALTER VIEW public.channel_statistics OWNER TO anon;
-ALTER VIEW public.recent_activity OWNER TO anon;
+-- ============================================================================
+-- RETENTION CLEANUP
+-- ============================================================================
+-- disk_usage and tunnels are append-only and only their newest rows are ever
+-- read. Trim them so they don't grow unbounded and bloat the database.
+-- Keep the last 7 days of disk samples / last 50 tunnels.
+DELETE FROM public.disk_usage
+WHERE recorded_at < NOW() - INTERVAL '7 days';
+DELETE FROM public.tunnels
+WHERE id NOT IN (
+    SELECT id FROM public.tunnels ORDER BY created_at DESC LIMIT 50
+);
