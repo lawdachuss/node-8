@@ -69,9 +69,9 @@ func (c *Coordinator) StartOfflineShuffleLoop(ctx context.Context) {
 // actually migrate to a different node instead of being immediately re-claimed
 // by the same node (which, after releasing, is under fair-share and would just
 // absorb them again — the old behaviour that pinned every channel to its first
-// claimer). Offline channels keep migrating node-to-node; the moment one goes
-// live the liveness loop marks it 'recording' and ReleaseExcessOfflineChannels
-// (now only used as a safety net) won't touch it.
+// claimer). If this node has any locally running channels (recording live
+// broadcasts), the entire cycle is skipped — a node busy recording should not
+// be moving channels around.
 func (c *Coordinator) runOfflineShuffleCycle() {
 	if !c.isActive() {
 		return
@@ -145,14 +145,18 @@ func (c *Coordinator) runOfflineShuffleCycle() {
 		log.Printf("[coordinator] offline shuffle: get assignments error: %v", err)
 		return
 	}
-	// Never move a channel that is currently running on this node. A channel
-	// that just went live is being recorded by a local worker even if its
-	// coordinator status hasn't been updated to 'recording' yet (up to the
-	// 120s live-check window) — moving it would cause a recording gap/handoff.
+	// If this node has any locally running (recording) channels, skip the
+	// shuffle entirely. A node busy recording live broadcasts should not be
+	// moving channels around — that adds DB load and risks a recording gap if
+	// an offline channel happens to go live mid-migration.
 	localSet := make(map[string]bool)
 	for _, u := range c.Manager.GetLocalChannels() {
 		localSet[u] = true
 	}
+	if len(localSet) > 0 {
+		return
+	}
+
 	var offline []database.ChannelAssignment
 	for _, ca := range myChannels {
 		if ca.IsLive {

@@ -782,8 +782,8 @@ func startTunnel(port string) {
 	case tunnelURL := <-tunnelURLCh:
 		fmt.Printf("🌍 Public: %s\n\n", tunnelURL)
 		fmt.Printf("::notice title=Web UI::%s\n", tunnelURL)
-	case <-time.After(30 * time.Second):
-		fmt.Println("⚠️  Tunnel URL not obtained within 30s")
+	case <-time.After(60 * time.Second):
+		fmt.Println("⚠️  Tunnel URL not obtained within 60s")
 	}
 
 	cmd.Wait()
