@@ -428,109 +428,20 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			return false
 		}
 
-		// generatePreview runs ffmpeg with input-seek + concat filter_complex
-		// (or a simple single-segment fallback).  Returns true if the preview
-		// file was successfully created.
 		generatePreview := func(ctx context.Context) bool {
 			var err error
-			var stderr string
+
 			if dur <= 0 {
-				// Duration unknown (probe failed). Encoding the whole file as
-				// the preview would produce a multi-GB clip for long videos, so
-				// cap to the first previewDuration seconds from the start.
-				// For LL-HLS files the first frame starts at ptsOffset, so
-				// seek to ptsOffset to avoid a black/garbled preview.
 				seekStart := "0"
 				if ptsOffset > 0 {
 					seekStart = fmt.Sprintf("%.2f", ptsOffset)
 				}
-				stderr, err = runFFmpeg(ctx,
+				_, err = runFFmpeg(ctx,
 					"-y",
 					"-ss", seekStart,
 					"-i", videoPath,
 					"-t", fmt.Sprintf("%.2f", previewDuration),
-				"-vf", fmt.Sprintf("scale=%d:-2:flags=lanczos,fps=30", previewWidth),
-				"-vsync", "vfr",
-				"-c:v", "libx264",
-				"-preset", "fast",
-				"-crf", "23",
-				"-movflags", "+faststart",
-				"-an",
-				previewMP4,
-			)
-		} else if dur <= previewDuration {
-			stderr, err = runFFmpeg(ctx,
-				"-y",
-				"-i", videoPath,
-				"-vf", fmt.Sprintf("scale=%d:-2:flags=lanczos,fps=30", previewWidth),
-				"-vsync", "vfr",
-					"-c:v", "libx264",
-					"-preset", "fast",
-					"-crf", "23",
-					"-movflags", "+faststart",
-					"-an",
-					previewMP4,
-				)
-			} else {
-				// Single-input montage: open the recording ONCE and trim
-				// previewSegments evenly-spaced clips in one filter_complex.
-				// This is robust regardless of whether the source has
-				// +faststart (moov at the end of the file): ffmpeg opens the
-				// file a single time and decodes it once.  The prior 12-separate
-				// -i approach opened the file 12× and was extremely slow on
-				// non-faststart recordings (each open scanned the whole file).
-				segDuration := previewDuration / float64(previewSegments)
-
-				var filterParts []string
-				var concatInputs []string
-				for i := 0; i < previewSegments; i++ {
-					// Anchor clips across the full timeline: clip 0 sits at the
-					// very start (0%) and the last clip at the very end (100%),
-					// with the rest evenly spaced in between.  This guarantees
-					// the preview spans the ENTIRE recording (no missing
-					// beginning/end) and the clips play back in true timeline
-					// order.  The earlier midpoint-of-slot sampling left the
-					// first/last ~half-slot of the recording uncovered.
-					var center float64
-					if previewSegments == 1 {
-						center = dur / 2
-					} else {
-						center = (float64(i) / float64(previewSegments-1)) * dur
-					}
-					start := center - segDuration/2
-					// Clamp so the clip stays fully inside [0, dur].  Both
-					// branches are needed: the start clip can go negative
-					// (center=0) and the end clip can overrun (center=dur).
-					if start < 0 {
-						start = 0
-					}
-					if start+segDuration > dur {
-						start = dur - segDuration
-					}
-					if start < 0 {
-						start = 0
-					}
-					label := fmt.Sprintf("v%d", i)
-					filterParts = append(filterParts, fmt.Sprintf(
-						"[0:v]trim=start=%.3f:duration=%.3f,setpts=PTS-STARTPTS[%s]",
-						ptsOffset+start, segDuration, label,
-					))
-					concatInputs = append(concatInputs, fmt.Sprintf("[%s]", label))
-				}
-				// Concatenate the 12 clips, then scale+pad the whole 18s
-				// montage once (fixed 16:9 frame so concat never fails on
-				// aspect drift).  +faststart on output so web playback starts
-				// immediately.
-				filterComplex := strings.Join(filterParts, ";") + ";" +
-					strings.Join(concatInputs, "") +
-					fmt.Sprintf("concat=n=%d:v=1:a=0,scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=30[out]",
-						previewSegments, previewWidth, previewHeight, previewWidth, previewHeight)
-
-					stderr, err = runFFmpeg(ctx,
-					"-y",
-					"-i", videoPath,
-					"-filter_complex", filterComplex,
-					"-map", "[out]",
+					"-vf", fmt.Sprintf("scale=%d:-2:flags=lanczos,fps=30", previewWidth),
 					"-vsync", "vfr",
 					"-c:v", "libx264",
 					"-preset", "fast",
@@ -539,30 +450,56 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 					"-an",
 					previewMP4,
 				)
-
-				if err != nil || !fileExists(previewMP4) {
-					if err != nil {
-						errFn("preview: complex filter failed for %s: %v (ffmpeg: %s), trying simple fallback", baseName, err, stderr)
-					} else {
-						errFn("preview: complex filter produced no output for %s, trying simple fallback", baseName)
-					}
-					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-					defer fallbackCancel()
-					stderr, err = runFFmpeg(fallbackCtx,
-						"-y",
-						"-ss", fmt.Sprintf("%.2f", ptsOffset+dur*0.3),
-						"-i", videoPath,
-						"-t", fmt.Sprintf("%.2f", previewDuration),
-						"-vf", fmt.Sprintf("scale=%d:-2:flags=lanczos,fps=30", previewWidth),
-						"-vsync", "vfr",
-						"-c:v", "libx264",
-						"-preset", "fast",
-						"-crf", "23",
-						"-movflags", "+faststart",
-						"-an",
-						previewMP4,
-					)
+			} else if dur <= previewDuration {
+				_, err = runFFmpeg(ctx,
+					"-y",
+					"-i", videoPath,
+					"-vf", fmt.Sprintf("scale=%d:-2:flags=lanczos,fps=30", previewWidth),
+					"-vsync", "vfr",
+					"-c:v", "libx264",
+					"-preset", "fast",
+					"-crf", "23",
+					"-movflags", "+faststart",
+					"-an",
+					previewMP4,
+				)
+			} else {
+				segDur := previewDuration / float64(previewSegments)
+				clips := previewSegments
+				if clips < 2 {
+					clips = 2
 				}
+				var selects []string
+				for i := 0; i < clips; i++ {
+					center := (float64(i) / float64(clips-1)) * dur
+					start := center - segDur/2
+					if start < 0 {
+						start = 0
+					}
+					end := start + segDur
+					if end > dur {
+						start = dur - segDur
+						end = dur
+					}
+					if start < 0 {
+						start = 0
+					}
+					selects = append(selects, fmt.Sprintf("between(t,%0.3f,%0.3f)", ptsOffset+start, ptsOffset+end))
+				}
+				filter := fmt.Sprintf("select='%s',setpts=N/30/TB,scale=%d:-2:flags=lanczos,fps=30",
+					strings.Join(selects, "+"), previewWidth)
+				_, err = runFFmpeg(ctx,
+					"-y",
+					"-i", videoPath,
+					"-vf", filter,
+					"-vsync", "vfr",
+					"-c:v", "libx264",
+					"-preset", "fast",
+					"-crf", "23",
+					"-movflags", "+faststart",
+					"-an",
+					previewMP4,
+				)
 			}
 
 			if err != nil {
