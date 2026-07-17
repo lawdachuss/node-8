@@ -508,8 +508,12 @@ jobs:
           if (-not $tunnelUrl -and (Test-Path $turlTemp)) { $tunnelUrl = (Get-Content $turlTemp -Raw).Trim() }
           function Shorten-Url {
             param($u)
-            try { return (Invoke-RestMethod -Uri "https://tinyurl.com/api-create.php?url=$([uri]::EscapeDataString($u))" -TimeoutSec 10 -ErrorAction Stop).Trim() } catch {}
-            try { return (Invoke-RestMethod -Uri "https://is.gd/create.php?format=simple&url=$([uri]::EscapeDataString($u))" -TimeoutSec 10 -ErrorAction Stop).Trim() } catch {}
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $enc = [uri]::EscapeDataString($u)
+            try { return (Invoke-RestMethod -Uri "https://tinyurl.com/api-create.php?url=$enc" -TimeoutSec 15 -ErrorAction Stop).Trim() } catch {}
+            try { return (Invoke-RestMethod -Uri "https://is.gd/create.php?format=simple&url=$enc" -TimeoutSec 15 -ErrorAction Stop).Trim() } catch {}
+            try { return (Invoke-RestMethod -Uri "https://v.gd/create.php?format=simple&url=$enc" -TimeoutSec 15 -ErrorAction Stop).Trim() } catch {}
+            try { return (Invoke-RestMethod -Uri "https://clck.ru/--?url=$enc" -TimeoutSec 15 -ErrorAction Stop).Trim() } catch {}
             return $null
           }
           function Get-NodeId {
@@ -536,7 +540,12 @@ jobs:
           if ($tunnelUrl -and $myNodeId) {
             $tunnelUrl | Set-Content $tunnelUrlFile -Force
             $short = Shorten-Url $tunnelUrl
-            if ($short) { Write-Host "[OK] Dashboard: $short" } else { Write-Host "[OK] Tunnel URL" }
+            if ($short) {
+              Write-Host "[OK] Dashboard: $short"
+              if ($env:GITHUB_STEP_SUMMARY) { "## Dashboard" | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8; "Open your RDP dashboard: [$short]($short)" | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append }
+            } else {
+              Write-Host "[OK] Visit dashboard via nodes page artifact or nodes page"
+            }
             Update-NodeWebUrl $myNodeId $tunnelUrl
           }
 
@@ -562,7 +571,7 @@ jobs:
               $stderr = "$repoDir\tunnel-stderr.log"; if (Test-Path $stderr) { Remove-Item $stderr -Force }
               $tun = Start-Process -FilePath $cloudflaredPath -ArgumentList "tunnel --url http://localhost:8080 --protocol http2" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardError $stderr -PassThru
               Start-Sleep -Seconds 10
-              if (Test-Path $stderr) { $c = Get-Content $stderr -Raw; $m = [regex]::Match($c, 'https://[a-z0-9\-]+\.trycloudflare\.com'); if ($m.Success) { $tunnelUrl = $m.Value; $tunnelUrl | Set-Content $tunnelUrlFile -Force; $short = Shorten-Url $tunnelUrl; if ($short) { Write-Host "[OK] Dashboard restarted: $short" } else { Write-Host "[OK] Tunnel restarted" }; Update-NodeWebUrl $myNodeId $tunnelUrl } }
+              if (Test-Path $stderr) { $c = Get-Content $stderr -Raw; $m = [regex]::Match($c, 'https://[a-z0-9\-]+\.trycloudflare\.com'); if ($m.Success) { $tunnelUrl = $m.Value; $tunnelUrl | Set-Content $tunnelUrlFile -Force; $short = Shorten-Url $tunnelUrl; if ($short) { Write-Host "[OK] Dashboard restarted: $short" } else { Write-Host "[OK] Tunnel restarted - download artifact for link" }; Update-NodeWebUrl $myNodeId $tunnelUrl } }
             }
             $pub = if ($tunnelUrl) { " | public" } else { "" }
             $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
