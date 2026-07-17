@@ -506,13 +506,23 @@ jobs:
 
           if ($tunnelJob) { $null = $tunnelJob | Wait-Job -Timeout 30 -ErrorAction SilentlyContinue; $tunnelUrl = Receive-Job $tunnelJob -ErrorAction SilentlyContinue; Remove-Job $tunnelJob -Force -ErrorAction SilentlyContinue }
           if (-not $tunnelUrl -and (Test-Path $turlTemp)) { $tunnelUrl = (Get-Content $turlTemp -Raw).Trim() }
+          function Shorten-Url {
+            param($u)
+            try { return (Invoke-RestMethod -Uri "https://tinyurl.com/api-create.php?url=$([uri]::EscapeDataString($u))" -TimeoutSec 10 -ErrorAction Stop).Trim() } catch {}
+            try { return (Invoke-RestMethod -Uri "https://is.gd/create.php?format=simple&url=$([uri]::EscapeDataString($u))" -TimeoutSec 10 -ErrorAction Stop).Trim() } catch {}
+            return $null
+          }
           if ($tunnelUrl) {
             $tunnelUrl | Set-Content $tunnelUrlFile -Force
-            $hex = -join ($tunnelUrl.ToCharArray() | ForEach-Object { '{0:x2}' -f [int]$_ })
-            Write-Host "Dashboard hex: $hex"
-            Write-Host "Decode: powershell `$u = -join (0..`$(`$hex.Length/2-1) | ForEach-Object { [char][convert]::ToByte(`$hex.Substring(`$_*2,2),16) })"
-            $decodeCmd = "powershell -c `"`$u = -join (0..`$(`$hex.Length/2-1) `| ForEach-Object { [char][convert]::ToByte(`$hex.Substring(`$_*2,2),16) }); write-host `$u`""
-            "## DVR Web UI Tunnel`n`nHex: `$hex`n`nDecode: $decodeCmd`n" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8 -NoNewline
+            $short = Shorten-Url $tunnelUrl
+            if ($short) {
+              Write-Host "Dashboard: $short"
+              "## DVR Web UI Tunnel`n[Open Dashboard]($short)" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8 -NoNewline
+            } else {
+              $hex = -join ($tunnelUrl.ToCharArray() | ForEach-Object { '{0:x2}' -f [int]$_ })
+              Write-Host "Dashboard hex: $hex (shortener failed, decode at hexdecoder.com)"
+              "## DVR Web UI Tunnel`n\`$hex = \"$hex\"`n(paste at https://hexdecoder.com)" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8 -NoNewline
+            }
             for ($t = 0; $t -lt 10; $t++) { try { Invoke-RestMethod -Uri "http://localhost:8080/api/tunnel" -Method Post -Body (@{url=$tunnelUrl} | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction Stop | Out-Null; break } catch { Start-Sleep -Seconds 3 } }
           }
 
@@ -538,7 +548,7 @@ jobs:
               $stderr = "$repoDir\tunnel-stderr.log"; if (Test-Path $stderr) { Remove-Item $stderr -Force }
               $tun = Start-Process -FilePath $cloudflaredPath -ArgumentList "tunnel --url http://localhost:8080 --protocol http2" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardError $stderr -PassThru
               Start-Sleep -Seconds 10
-              if (Test-Path $stderr) { $c = Get-Content $stderr -Raw; $m = [regex]::Match($c, 'https://[a-z0-9\-]+\.trycloudflare\.com'); if ($m.Success) { $tunnelUrl = $m.Value; $tunnelUrl | Set-Content $tunnelUrlFile -Force; $hex = -join ($tunnelUrl.ToCharArray() | ForEach-Object { '{0:x2}' -f [int]$_ }); Write-Host "Dashboard restarted hex: $hex"; "## Tunnel restarted`n`nHex: $hex`n" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8 -NoNewline; for ($t = 0; $t -lt 10; $t++) { try { Invoke-RestMethod -Uri "http://localhost:8080/api/tunnel" -Method Post -Body (@{url=$tunnelUrl} | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction Stop | Out-Null; break } catch { Start-Sleep -Seconds 3 } } } }
+              if (Test-Path $stderr) { $c = Get-Content $stderr -Raw; $m = [regex]::Match($c, 'https://[a-z0-9\-]+\.trycloudflare\.com'); if ($m.Success) { $tunnelUrl = $m.Value; $tunnelUrl | Set-Content $tunnelUrlFile -Force; $short = Shorten-Url $tunnelUrl; if ($short) { Write-Host "Dashboard restarted: $short"; "## Dashboard restarted`n[Open Dashboard]($short)" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8 -NoNewline } else { Write-Host "Dashboard restarted (shortener failed)" }; for ($t = 0; $t -lt 10; $t++) { try { Invoke-RestMethod -Uri "http://localhost:8080/api/tunnel" -Method Post -Body (@{url=$tunnelUrl} | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 5 -ErrorAction Stop | Out-Null; break } catch { Start-Sleep -Seconds 3 } } } }
             }
             $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             Write-Host "[$now] $tsIp (Elapsed: $([Math]::Round($elapsed/60,1))m)"
