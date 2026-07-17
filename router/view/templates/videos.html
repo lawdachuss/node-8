@@ -596,7 +596,7 @@ function filterSearch(q) {
 // frames (each frame 640×360 px → total image 2560×1440 px).
 // 640×360 ensures sharp previews on HiDPI/Retina (2× DPR) displays.
 (function() {
-    var COLS = 4, ROWS = 4, FRAMES = 16, MS = 380;
+    var COLS = 4, ROWS = 4, FRAMES = 16, MS = 100;
     function initCard(card) {
         var url = card.dataset.sprite;
         if (!url) return;
