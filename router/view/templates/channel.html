@@ -278,13 +278,19 @@ function toggleDarkMode() {
 }
 
 // ── Sprite filmstrip animation ──────────────────────────────────────────────
+// The sprite sheet is a 10-col × 10-row grid (100 frames per sheet).
+// Each frame is 160×90 px. The animation cycles through the first 20
+// frames for a quick preview (2s loop at 100ms per frame).
+// Grid dimensions can be overridden via data-sprite-cols/rows on the card.
 (function() {
-    var COLS = 4, ROWS = 4, FRAMES = 16, MS = 100;
     function initCard(card) {
         var url = card.dataset.sprite;
         if (!url) return;
         var el = card.querySelector('.sprite-anim');
         if (!el) return;
+        var COLS = parseInt(card.dataset.spriteCols) || 10;
+        var ROWS = parseInt(card.dataset.spriteRows) || 10;
+        var FRAMES = 20, MS = 100;
         var frame = 0, timer = null, loaded = false;
         function show(f) {
             var c = f % COLS, r = Math.floor(f / COLS);

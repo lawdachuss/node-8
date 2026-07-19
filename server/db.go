@@ -866,7 +866,7 @@ func LoadCurrentTunnel() (string, error) {
 // ─── Preview Links ────────────────────────────────────────────────────────────
 
 // SavePreviewLinks saves preview image URLs to Supabase
-func SavePreviewLinks(filename, thumbnailURL, spriteURL, previewURL string) error {
+func SavePreviewLinks(filename, thumbnailURL, spriteURL, previewURL, spriteVTTURL string) error {
 	client := GetDBClient()
 	if client == nil {
 		return fmt.Errorf("Supabase not configured")
@@ -877,6 +877,7 @@ func SavePreviewLinks(filename, thumbnailURL, spriteURL, previewURL string) erro
 		ThumbnailURL: thumbnailURL,
 		SpriteURL:    spriteURL,
 		PreviewURL:   previewURL,
+		SpriteVTTURL: spriteVTTURL,
 		UploadedAt:   time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 	}
 
@@ -901,6 +902,19 @@ func LoadPreviewLinks(filename string) (thumbnailURL, spriteURL, previewURL stri
 	}
 
 	return img.ThumbnailURL, img.SpriteURL, img.PreviewURL
+}
+
+// LoadSpriteVTTURL loads the sprite VTT URL from the preview_images table.
+func LoadSpriteVTTURL(filename string) string {
+	client := GetDBClient()
+	if client == nil {
+		return ""
+	}
+	img, err := client.GetPreviewImage(filename)
+	if err != nil || img == nil {
+		return ""
+	}
+	return img.SpriteVTTURL
 }
 
 // LoadAllPreviewLinks returns a map of filename -> [thumbnailURL, spriteURL, previewURL] for all preview images.
@@ -982,6 +996,64 @@ func UpdateRecordingThumbnails(filename, thumbnailURL, spriteURL, previewURL str
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
 	}
+	return nil
+}
+
+// SaveSpriteVTTURL does a targeted PATCH to set sprite_vtt_url on an existing
+// preview_images row without touching other fields.
+func SaveSpriteVTTURL(filename, vttURL string) error {
+	body, err := json.Marshal(map[string]string{
+		"sprite_vtt_url": vttURL,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	resp, err := supabaseRequest("PATCH",
+		fmt.Sprintf("/preview_images?filename=eq.%s", url.QueryEscape(filename)),
+		body,
+	)
+	if err != nil {
+		return fmt.Errorf("patch request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	InvalidateAllCaches()
+	return nil
+}
+
+// SaveSpriteSheetURLs stores multi-sheet sprite URLs in the sprite_vtt_url field
+// as a JSON array (prefixed with "json:") so the frontend can discover all
+// sheets for seekbar preview rendering.
+func SaveSpriteSheetURLs(filename string, sheetURLs []string) error {
+	if len(sheetURLs) <= 1 {
+		return nil
+	}
+	data, err := json.Marshal(sheetURLs)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	body, err := json.Marshal(map[string]string{
+		"sprite_vtt_url": "json:" + string(data),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal body: %w", err)
+	}
+	resp, err := supabaseRequest("PATCH",
+		fmt.Sprintf("/preview_images?filename=eq.%s", url.QueryEscape(filename)),
+		body,
+	)
+	if err != nil {
+		return fmt.Errorf("patch request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	InvalidateAllCaches()
 	return nil
 }
 

@@ -197,9 +197,9 @@ func main() {
 
 		// Construct uploader using server.Config
 		// Generate thumbnails/sprite and save preview links (requires ffmpeg/ffprobe in PATH).
-		thumbURL, spriteURL, previewURL := channel.GenerateThumbnailForFile(p)
+		thumbURL, spriteURL, previewURL, spriteVTTURL := channel.GenerateThumbnailForFile(p)
 		if thumbURL != "" || spriteURL != "" || previewURL != "" {
-			if err := server.SavePreviewLinks(filename, thumbURL, spriteURL, previewURL); err != nil {
+			if err := server.SavePreviewLinks(filename, thumbURL, spriteURL, previewURL, spriteVTTURL); err != nil {
 				log.Printf("warning: failed to save preview links for %s: %v", filename, err)
 			} else {
 				log.Printf("saved previews for %s", filename)

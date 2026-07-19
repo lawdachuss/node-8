@@ -101,10 +101,11 @@ type Pipeline struct {
 	Framerate  int      `json:"framerate"`
 
 	// Results populated by stages, consumed by downstream stages
-	ThumbURL   string            `json:"thumb_url"`
-	SpriteURL  string            `json:"sprite_url"`
-	PreviewURL string            `json:"preview_url"`
-	EmbedURL   string            `json:"embed_url"`
+	ThumbURL     string            `json:"thumb_url"`
+	SpriteURL    string            `json:"sprite_url"`
+	PreviewURL   string            `json:"preview_url"`
+	SpriteVTTURL string            `json:"sprite_vtt_url"`
+	EmbedURL     string            `json:"embed_url"`
 	Links      map[string]string `json:"links"` // host -> download URL
 
 	mu sync.Mutex
@@ -182,13 +183,14 @@ func (p *Pipeline) stageThumbnail(ch *Channel) error {
 	if p.ThumbURL != "" && p.SpriteURL != "" && p.PreviewURL != "" {
 		return nil
 	}
-	thumbURL, spriteURL, previewURL := ch.generateThumbnail(p.FilePath)
+	thumbURL, spriteURL, previewURL, spriteVTTURL := ch.generateThumbnail(p.FilePath)
 	if thumbURL == "" && spriteURL == "" && previewURL == "" {
 		return nil
 	}
 	p.ThumbURL = thumbURL
 	p.SpriteURL = spriteURL
 	p.PreviewURL = previewURL
+	p.SpriteVTTURL = spriteVTTURL
 	return nil
 }
 
@@ -518,11 +520,12 @@ func (p *Pipeline) seekStreamingMediaFromHosts() (posterURL, previewURL string) 
 func (p *Pipeline) stageSaveMetadata(ch *Channel) error {
 	// Retry thumbnail generation if it failed during StageThumbnailUpload.
 	if p.ThumbURL == "" && p.SpriteURL == "" && p.PreviewURL == "" {
-		thumbURL, spriteURL, previewURL := ch.generateThumbnail(p.FilePath)
+		thumbURL, spriteURL, previewURL, spriteVTTURL := ch.generateThumbnail(p.FilePath)
 		if thumbURL != "" || spriteURL != "" || previewURL != "" {
 			p.ThumbURL = thumbURL
 			p.SpriteURL = spriteURL
 			p.PreviewURL = previewURL
+			p.SpriteVTTURL = spriteVTTURL
 			ch.Info("upload: generated thumbnails for %s (retry)", p.Filename)
 		} else if pu := p.posterFromHosts(); pu != "" {
 			p.ThumbURL = pu
@@ -533,7 +536,12 @@ func (p *Pipeline) stageSaveMetadata(ch *Channel) error {
 	}
 
 	if p.ThumbURL != "" || p.SpriteURL != "" || p.PreviewURL != "" {
-		if err := server.SavePreviewLinks(p.Filename, p.ThumbURL, p.SpriteURL, p.PreviewURL); err != nil {
+		// On pipeline resume, SpriteVTTURL isn't persisted in pipeline_states.
+		// Load the existing VTT URL from the DB to avoid overwriting it with empty.
+		if p.SpriteVTTURL == "" {
+			p.SpriteVTTURL = server.LoadSpriteVTTURL(p.Filename)
+		}
+		if err := server.SavePreviewLinks(p.Filename, p.ThumbURL, p.SpriteURL, p.PreviewURL, p.SpriteVTTURL); err != nil {
 			ch.Error("upload: could not save preview links for %s: %v", p.Filename, err)
 			p.LastError = err.Error()
 			return err

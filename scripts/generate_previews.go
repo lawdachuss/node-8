@@ -325,7 +325,7 @@ func main() {
 		}
 
 		log.Printf("  generating thumbnails for %s...", localPath)
-		thumbURL, spriteURL, previewURL := channel.GenerateThumbnailForFile(localPath)
+		thumbURL, spriteURL, previewURL, spriteVTTURL := channel.GenerateThumbnailForFile(localPath)
 
 		if thumbURL == "" && spriteURL == "" && previewURL == "" {
 			log.Printf("  WARN: thumbnail generation returned empty URLs")
@@ -335,9 +335,10 @@ func main() {
 		log.Printf("  thumb: %s", thumbURL)
 		log.Printf("  sprite: %s", spriteURL)
 		log.Printf("  preview: %s", previewURL)
+		log.Printf("  sprite VTT: %s", spriteVTTURL)
 
 		log.Printf("  saving to preview_images table...")
-		if err := server.SavePreviewLinks(r.Filename, thumbURL, spriteURL, previewURL); err != nil {
+		if err := server.SavePreviewLinks(r.Filename, thumbURL, spriteURL, previewURL, spriteVTTURL); err != nil {
 			log.Printf("  WARN: SavePreviewLinks failed: %v", err)
 		}
 

@@ -69,7 +69,7 @@ const (
 // Supabase for any hosts that already received this file (e.g. from a
 // previous interrupted run).  Those hosts are skipped.  After each attempt,
 // journal entries are upserted so crash recovery is precise.
-func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL string) bool {
+func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL, spriteVTTURL string) bool {
 	cfg := server.Config
 	if cfg == nil {
 		return false
@@ -229,7 +229,7 @@ uploadStageDone:
 	// Always save preview links to Supabase first — even if video upload fails,
 	// the preview images were already uploaded to image hosts.
 	if thumbURL != "" || spriteURL != "" || previewURL != "" {
-		if err := server.SavePreviewLinks(filename, thumbURL, spriteURL, previewURL); err != nil {
+		if err := server.SavePreviewLinks(filename, thumbURL, spriteURL, previewURL, spriteVTTURL); err != nil {
 			ch.Error("upload: could not save preview links for %s: %v", filename, err)
 		} else {
 			ch.Info("upload: saved preview links for %s", filename)

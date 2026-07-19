@@ -685,6 +685,7 @@ func VideoDetail(c *gin.Context) {
 
 	// Load preview URLs from Supabase
 	thumbURL, spriteURL, previewURL := server.LoadPreviewLinks(filename)
+	spriteVTTURL := server.LoadSpriteVTTURL(filename)
 
 	// Look up recording metadata from recordings DB
 	db := loadRecordings()
@@ -833,6 +834,7 @@ func VideoDetail(c *gin.Context) {
 		"Username":        username,
 		"ThumbnailURL":    thumbURL,
 		"SpriteURL":       spriteURL,
+		"SpriteVTTURL":    spriteVTTURL,
 		"PreviewURL":      previewURL,
 		"MimeType":        mimeType,
 		"Links":           links,

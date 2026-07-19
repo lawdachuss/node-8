@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS preview_images (
     thumbnail_url TEXT,
     sprite_url TEXT,
     preview_url TEXT,
+    sprite_vtt_url TEXT,
     instance_id TEXT NOT NULL DEFAULT 'default',
     uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE(filename)
@@ -194,6 +195,9 @@ CREATE TABLE IF NOT EXISTS preview_images (
 CREATE INDEX IF NOT EXISTS idx_preview_images_recording_id ON preview_images(recording_id);
 CREATE INDEX IF NOT EXISTS idx_preview_images_filename ON preview_images(filename);
 CREATE INDEX IF NOT EXISTS idx_preview_images_instance ON preview_images(instance_id);
+
+-- Add sprite_vtt_url to existing preview_images tables (safe re-run via IF NOT EXISTS)
+ALTER TABLE preview_images ADD COLUMN IF NOT EXISTS sprite_vtt_url TEXT;
 
 -- ============================================================================
 -- 8. UPLOAD_JOURNAL

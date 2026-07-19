@@ -123,6 +123,37 @@
             border-radius: 4px;
             pointer-events: none;
         }
+        .seekbar-preview {
+            position: absolute;
+            bottom: 20px;
+            transform: translateX(-50%);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .seekbar-preview-img {
+            width: 160px;
+            height: 90px;
+            background-size: cover;
+            background-position: center;
+            border-radius: 6px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+            border: 2px solid rgba(255,255,255,0.15);
+            background-color: #000;
+        }
+        .seekbar-preview-time {
+            margin-top: 4px;
+            background: rgba(0,0,0,0.8);
+            backdrop-filter: blur(8px);
+            color: #fff;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 4px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
         .progress-time-tooltip {
             position: absolute;
             bottom: 14px;
@@ -661,6 +692,10 @@
         <!-- Custom controls -->
         <div class="custom-controls">
             <div class="progress-container" id="progress-container">
+                <div class="seekbar-preview" id="seekbar-preview">
+                    <div class="seekbar-preview-img" id="seekbar-preview-img"></div>
+                    <div class="seekbar-preview-time" id="seekbar-preview-time">0:00</div>
+                </div>
                 <div class="progress-buffer" id="progress-buffer" style="width:0%"></div>
                 <div class="progress-hover" id="progress-hover"></div>
                 <div class="progress-bar" id="progress-bar" style="width:0%"></div>
@@ -774,6 +809,10 @@
         </div>
         <div class="custom-controls">
             <div class="progress-container" id="progress-container">
+                <div class="seekbar-preview" id="seekbar-preview">
+                    <div class="seekbar-preview-img" id="seekbar-preview-img"></div>
+                    <div class="seekbar-preview-time" id="seekbar-preview-time">0:00</div>
+                </div>
                 <div class="progress-hover" id="progress-hover"></div>
                 <div class="progress-bar" id="progress-bar" style="width:0%"></div>
                 <div class="progress-time-tooltip" id="progress-tooltip">0:00</div>
@@ -1103,7 +1142,7 @@ function buildVideoPlayerHTML(src) {
         '<video id="video-player" preload="metadata" playsinline crossorigin="anonymous" onloadeddata="playerLoaded()" onerror="playerError()" onplay="onPlay()" onpause="onPause()"><source src="' + src + '" type="video/mp4" /></video>' +
         '<div class="center-play" onclick="togglePlay()"><div class="center-play-btn"><svg fill="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21"/></svg></div></div>' +
         '<div id="error-message" class="hidden" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#000;z-index:20;color:#71717a"><svg class="w-12 h-12 mb-3" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg><p class="text-sm mb-4">Could not load video directly.</p><button onclick="retryVideo()" class="action-btn action-btn-ghost text-xs">Retry</button></div>' +
-        '<div class="custom-controls"><div class="progress-container" id="progress-container"><div class="progress-hover" id="progress-hover"></div><div class="progress-bar" id="progress-bar" style="width:0%"></div><div class="progress-time-tooltip" id="progress-tooltip">0:00</div></div>' +
+        '<div class="custom-controls"><div class="progress-container" id="progress-container"><div class="seekbar-preview" id="seekbar-preview"><div class="seekbar-preview-img" id="seekbar-preview-img"></div><div class="seekbar-preview-time" id="seekbar-preview-time">0:00</div></div><div class="progress-hover" id="progress-hover"></div><div class="progress-bar" id="progress-bar" style="width:0%"></div><div class="progress-time-tooltip" id="progress-tooltip">0:00</div></div>' +
         '<div class="controls-row"><div class="ctrl-left"><button class="ctrl-btn" onclick="togglePlay()" title="Play (Space)"><svg id="icon-play" fill="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21"/></svg><svg id="icon-pause" fill="currentColor" viewBox="0 0 24 24" style="display:none"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>' +
         '<div class="volume-wrap"><button class="ctrl-btn" onclick="toggleMute()" title="Mute (M)"><svg id="icon-vol" fill="currentColor" viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 010 7.07" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M19.07 4.93a10 10 0 010 14.14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><svg id="icon-muted" fill="currentColor" viewBox="0 0 24 24" style="display:none"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="17" y1="9" x2="23" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>' +
         '<input type="range" class="volume-slider" id="volume-slider" min="0" max="1" step="0.05" value="1" oninput="setVolume(this.value)" /></div>' +
@@ -1245,6 +1284,11 @@ function formatTime(seconds) {
     return m + ':' + (s < 10 ? '0' : '') + s;
 }
 
+function vttToSeconds(vtt) {
+    var p = vtt.split(':');
+    return parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseFloat(p[2]);
+}
+
 function updateTotalTime() {
     var v = getVideo(); if (!v) return;
     var total = document.getElementById('time-total');
@@ -1269,17 +1313,47 @@ function initCustomControls() {
 
     v.addEventListener('loadedmetadata', updateTotalTime);
 
-    // Progress bar seek
+    // Progress bar seek + thumbnail preview
     var container = document.getElementById('progress-container');
+    var vttCues = null;
+    var vttLoaded = false;
+    var spriteVTTUrl = '{{ .SpriteVTTURL }}';
     if (container) {
         container.addEventListener('click', function(e) {
             var rect = container.getBoundingClientRect();
             var pct = (e.clientX - rect.left) / rect.width;
             v.currentTime = pct * v.duration;
         });
+        container.addEventListener('mouseenter', function() {
+            if (spriteVTTUrl && !vttLoaded) {
+                vttLoaded = true;
+                fetch(spriteVTTUrl).then(function(r) { return r.text(); }).then(function(text) {
+                    vttCues = [];
+                    var lines = text.split('\n');
+                    var start = null, end = null, img = null;
+                    for (var i = 0; i < lines.length; i++) {
+                        var l = lines[i].trim();
+                        var m = l.match(/^(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})/);
+                        if (m) { start = vttToSeconds(m[1]); end = vttToSeconds(m[2]); continue; }
+                        if (start !== null && l.indexOf('#xywh=') > -1) {
+                            var parts = l.split('#xywh=');
+                            if (parts.length === 2) {
+                                var coords = parts[1].split(',');
+                                if (coords.length === 4) {
+                                    vttCues.push({ start: start, end: end, img: parts[0], x: parseInt(coords[0]), y: parseInt(coords[1]), w: parseInt(coords[2]), h: parseInt(coords[3]) });
+                                }
+                            }
+                            start = null;
+                        }
+                    }
+                }).catch(function() {});
+            }
+        });
         container.addEventListener('mousemove', function(e) {
             var rect = container.getBoundingClientRect();
             var pct = (e.clientX - rect.left) / rect.width;
+            if (pct < 0) pct = 0;
+            if (pct > 1) pct = 1;
             var hover = document.getElementById('progress-hover');
             var tooltip = document.getElementById('progress-tooltip');
             if (hover) hover.style.width = (pct * 100) + '%';
@@ -1287,6 +1361,35 @@ function initCustomControls() {
                 tooltip.style.left = (pct * 100) + '%';
                 tooltip.textContent = formatTime(pct * v.duration);
             }
+            var preview = document.getElementById('seekbar-preview');
+            var previewImg = document.getElementById('seekbar-preview-img');
+            var previewTime = document.getElementById('seekbar-preview-time');
+            if (preview && previewImg && previewTime && vttCues) {
+                var t = pct * v.duration;
+                var cue = null;
+                for (var i = 0; i < vttCues.length; i++) {
+                    if (t >= vttCues[i].start && t < vttCues[i].end) { cue = vttCues[i]; break; }
+                }
+                if (cue) {
+                    previewImg.style.backgroundImage = "url('" + cue.img + "')";
+                    previewImg.style.backgroundPosition = '-' + cue.x + 'px -' + cue.y + 'px';
+                    previewImg.style.backgroundSize = 'auto';
+                    previewTime.textContent = formatTime(t);
+                    preview.style.display = 'flex';
+                    var previewLeft = pct * 100;
+                    if (previewLeft < 8) previewLeft = 8;
+                    if (previewLeft > 92) previewLeft = 92;
+                    preview.style.left = previewLeft + '%';
+                } else {
+                    preview.style.display = 'none';
+                }
+            } else if (preview) {
+                preview.style.display = 'none';
+            }
+        });
+        container.addEventListener('mouseleave', function() {
+            var preview = document.getElementById('seekbar-preview');
+            if (preview) preview.style.display = 'none';
         });
     }
 

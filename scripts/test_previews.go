@@ -44,13 +44,14 @@ func main() {
 
 		log.Printf("=== Processing: %s (%s) ===", entry.Name(), formatSize(fi.Size()))
 
-		thumbURL, spriteURL, previewURL := channel.GenerateThumbnailForFile(videoPath)
+		thumbURL, spriteURL, previewURL, spriteVTTURL := channel.GenerateThumbnailForFile(videoPath)
 
 		fmt.Println()
 		fmt.Printf("  Video:      %s\n", entry.Name())
 		fmt.Printf("  Thumbnail:  %s\n", orNone(thumbURL))
 		fmt.Printf("  Sprite:     %s\n", orNone(spriteURL))
 		fmt.Printf("  Preview:    %s\n", orNone(previewURL))
+		fmt.Printf("  Sprite VTT: %s\n", orNone(spriteVTTURL))
 		fmt.Println()
 	}
 

@@ -552,9 +552,9 @@ func (m *Manager) ScanThumbnails() {
 			if thumbURL != "" && spriteURL != "" && previewURL != "" {
 				return nil
 			}
-			newThumb, newSprite, newPreview := channel.GenerateThumbnailForFile(path)
+			newThumb, newSprite, newPreview, newVTT := channel.GenerateThumbnailForFile(path)
 			if newThumb != "" || newSprite != "" || newPreview != "" {
-				if err := server.SavePreviewLinks(info.Name(), newThumb, newSprite, newPreview); err != nil {
+				if err := server.SavePreviewLinks(info.Name(), newThumb, newSprite, newPreview, newVTT); err != nil {
 					log.Printf("[thumb] failed to save preview links for %s: %v", info.Name(), err)
 				}
 			}
