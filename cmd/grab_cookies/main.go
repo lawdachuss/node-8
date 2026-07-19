@@ -57,7 +57,7 @@ func main() {
 
 		// Must have cf_clearance
 		if v, found := cookies["cf_clearance"]; !found || v == "" {
-			fmt.Println("[SKIP] No cf_clearance from this proxy\n")
+			fmt.Println("[SKIP] No cf_clearance from this proxy")
 			continue
 		}
 

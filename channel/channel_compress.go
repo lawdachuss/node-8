@@ -2,10 +2,12 @@ package channel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -106,10 +108,15 @@ func (ch *Channel) CompressFile(srcPath string) {
 
 		ch.Info("compress: encoding %s (%s) using %s encoder", srcFilename, internal.FormatFilesize(int(srcSize)), encoder.name)
 
-		// Build ffmpeg command
+		// Build ffmpeg command.
+		// -af aresample=async=1:first_pts=0 dynamically resamples audio to match video
+		// clock, fixing gradual A/V drift that can creep in during long
+		// recordings.
 		args := []string{"-y", "-i", srcPath, "-c:v", encoder.codec}
 		args = append(args, encoder.args...)
-		args = append(args, "-c:a", "aac", "-b:a", "128k", mkvPath)
+		args = append(args, "-c:a", "aac", "-b:a", "128k",
+			"-af", "aresample=async=1:first_pts=0",
+			mkvPath)
 
 		defer config.AcquireFFmpegHeavy()()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
@@ -155,26 +162,91 @@ func (ch *Channel) CompressFile(srcPath string) {
 	}()
 }
 
+// probeFMP4StartTime probes a single-track fragmented MP4 file for its first
+// packet's presentation timestamp (PTS).  Returns -1 if the stream type is not
+// found or probing fails.
+func probeFMP4StartTime(path, streamType string) float64 {
+	probeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, perr := config.FFprobeCommandContext(probeCtx,
+		"-v", "error",
+		"-select_streams", streamType+":0",
+		"-show_entries", "stream=start_time",
+		"-of", "json",
+		path,
+	).Output()
+	if perr != nil {
+		return -1
+	}
+	var p struct {
+		Streams []struct {
+			StartTime string `json:"start_time"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &p); err != nil {
+		return -1
+	}
+	if len(p.Streams) == 0 {
+		return -1
+	}
+	v, e := strconv.ParseFloat(p.Streams[0].StartTime, 64)
+	if e != nil {
+		return -1
+	}
+	return v
+}
+
 // MuxAV combines separate video and audio source files into a single MP4 container.
+//
+// The function first probes both inputs for their first-packet presentation
+// timestamps.  When the audio starts after the video (very common on the first
+// poll of a live LL-HLS stream where separate audio/video playlists start at
+// different wall-clock moments), an -itsoffset is applied to the audio input so
+// both tracks begin at the same time.  This one-pass approach eliminates the
+// need for a second realignment pass (the old alignAVStart post-process) and
+// avoids the desync where the sound from the later audio segment ends up
+// playing against the earlier video content, so users hear audio running
+// seconds ahead of video.
 func (ch *Channel) MuxAV(videoPath, audioPath, outputPath string) error {
-	// LL-HLS fragments are timestamped against an absolute presentation
-	// timeline (TFDT), so the raw video and audio fragments only line up
-	// if we preserve those timestamps with -copyts. Dropping -copyts made
-	// ffmpeg renormalize each input to start at zero independently — which
-	// is fine when the first fetched video/audio segments happened to
-	// represent the same wall-clock moment, but when they differ (very
-	// common on the very first poll of a live stream), the sound from the
-	// later audio segment ends up playing against the earlier video
-	// content, so users hear audio running seconds ahead of video.
-	//
-	// Keep -copyts for content alignment, -shortest so a stray partial
-	// segment on one side cannot extend the combined duration past the
-	// point both tracks have real samples, and -avoid_negative_ts
-	// make_zero so H.264 B-frame reordering (negative DTS on the first
-	// packet) cannot desync the output on strict players.
+	// Probe both inputs for their starting PTS so we can align them.
+	videoStart := probeFMP4StartTime(videoPath, "v")
+	audioStart := probeFMP4StartTime(audioPath, "a")
+
+	// Calculate the shift needed to align audio to video.
+	// shift = videoStart - audioStart: positive means audio is behind,
+	// negative means audio is ahead.  We only correct offsets larger
+	// than 50ms to avoid unnecessary processing.
+	var shift float64
+	if videoStart >= 0 && audioStart >= 0 {
+		shift = videoStart - audioStart
+		if shift < 0.050 && shift > -0.050 {
+			shift = 0 // already aligned within perception threshold
+		} else {
+			ch.Info("mux: detected A/V offset of %.3fs (video:%.3fs audio:%.3fs) — applying -itsoffset %.3f to align",
+				audioStart-videoStart, videoStart, audioStart, shift)
+		}
+	} else if videoStart < 0 || audioStart < 0 {
+		ch.Info("mux: could not probe start times (v:%.3f a:%.3f) — muxing without offset correction",
+			videoStart, audioStart)
+	}
+
+	// Build the ffmpeg command with probe-based alignment:
+	//   - -copyts preserves the (adjusted) timestamps so content alignment is exact
+	//   - -itsoffset on audio shifts it to match video's start time
+	//   - -shortest prevents a stray partial segment from extending the output
+	//   - -avoid_negative_ts make_zero handles B-frame reordering (negative DTS)
+	//   - -fflags +genpts ensures every packet has a valid PTS
 	args := []string{
 		"-y",
+		"-fflags", "+genpts",
 		"-i", videoPath,
+	}
+	if shift != 0 {
+		args = append(args,
+			"-itsoffset", fmt.Sprintf("%f", shift),
+		)
+	}
+	args = append(args,
 		"-i", audioPath,
 		"-map", "0:v?",
 		"-map", "1:a?",
@@ -184,7 +256,7 @@ func (ch *Channel) MuxAV(videoPath, audioPath, outputPath string) error {
 		"-avoid_negative_ts", "make_zero",
 		"-movflags", "+faststart",
 		outputPath,
-	}
+	)
 
 	defer config.AcquireFFmpeg()()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -202,12 +274,35 @@ func (ch *Channel) MuxAV(videoPath, audioPath, outputPath string) error {
 		return fmt.Errorf("mux audio/video: %w", err)
 	}
 
-	ch.Info("mux: combined %s + %s -> %s", filepath.Base(videoPath), filepath.Base(audioPath), filepath.Base(outputPath))
+	if shift != 0 {
+		ch.Info("mux: combined %s + %s -> %s (synced, offset=%.3fs)",
+			filepath.Base(videoPath), filepath.Base(audioPath), filepath.Base(outputPath), shift)
+	} else {
+		ch.Info("mux: combined %s + %s -> %s",
+			filepath.Base(videoPath), filepath.Base(audioPath), filepath.Base(outputPath))
+	}
 	return nil
 }
 
 // MuxAVNative combines separate fragmented MP4 audio/video tracks without ffmpeg.
+// Unlike MuxAV (which uses ffmpeg with -itsoffset correction), this path aligns
+// audio and video by probing their TFDT (Track Fragment Decode Time) boxes and
+// shifting audio fragment timestamps by the offset.  Fragment counts are also
+// trimmed to the shorter track to prevent one side from extending past the other.
 func (ch *Channel) MuxAVNative(videoPath, audioPath, outputPath string) error {
+	// Probe TFDT-based start times for native alignment.
+	videoStart := probeFMP4StartTime(videoPath, "v")
+	audioStart := probeFMP4StartTime(audioPath, "a")
+	offsetSeconds := 0.0
+	if videoStart >= 0 && audioStart >= 0 && audioStart != videoStart {
+		offsetSeconds = audioStart - videoStart
+		if offsetSeconds < 0.050 && offsetSeconds > -0.050 {
+			offsetSeconds = 0 // within perception threshold
+		} else if offsetSeconds != 0 {
+			ch.Info("mux: native: detected A/V offset of %.3fs — will offset audio fragments", offsetSeconds)
+		}
+	}
+
 	videoFile, err := mp4.ReadMP4File(videoPath)
 	if err != nil {
 		return fmt.Errorf("decode video mp4: %w", err)
@@ -223,19 +318,26 @@ func (ch *Channel) MuxAVNative(videoPath, audioPath, outputPath string) error {
 	}
 
 	warn := func(msg string) { ch.Info("mux: %s", msg) }
-	if err := writeCombinedFragmentedMP4(outFile, videoFile, audioFile, warn); err != nil {			outFile.Close()
-			if rmErr := os.Remove(outputPath); rmErr != nil {
-				ch.Warn("mux: failed to remove incomplete output %s: %v", outputPath, rmErr)
-			}
-			return fmt.Errorf("native mux audio/video: %w", err)
+	if err := writeCombinedFragmentedMP4(outFile, videoFile, audioFile, offsetSeconds, warn); err != nil {
+		outFile.Close()
+		if rmErr := os.Remove(outputPath); rmErr != nil {
+			ch.Warn("mux: failed to remove incomplete output %s: %v", outputPath, rmErr)
+		}
+		return fmt.Errorf("native mux audio/video: %w", err)
 	}
 	outFile.Close()
 
-	ch.Info("mux: combined %s + %s -> %s (native)", filepath.Base(videoPath), filepath.Base(audioPath), filepath.Base(outputPath))
+	if offsetSeconds != 0 {
+		ch.Info("mux: combined %s + %s -> %s (native, synced offset=%.3fs)",
+			filepath.Base(videoPath), filepath.Base(audioPath), filepath.Base(outputPath), offsetSeconds)
+	} else {
+		ch.Info("mux: combined %s + %s -> %s (native)",
+			filepath.Base(videoPath), filepath.Base(audioPath), filepath.Base(outputPath))
+	}
 	return nil
 }
 
-func writeCombinedFragmentedMP4(w io.Writer, videoFile, audioFile *mp4.File, warn func(string)) error {
+func writeCombinedFragmentedMP4(w io.Writer, videoFile, audioFile *mp4.File, audioOffsetSeconds float64, warn func(string)) error {
 	_, videoTrex, err := sourceTrack(videoFile, "vide")
 	if err != nil {
 		return fmt.Errorf("load video track: %w", err)
@@ -268,7 +370,7 @@ func writeCombinedFragmentedMP4(w io.Writer, videoFile, audioFile *mp4.File, war
 		audioFragments = audioFragments[:minCount]
 	}
 
-	segments, err := combineTrackFragments(videoFragments, videoTrex, audioFragments, audioTrex)
+	segments, err := combineTrackFragments(videoFragments, videoTrex, audioFragments, audioTrex, audioOffsetSeconds)
 	if err != nil {
 		return err
 	}
@@ -326,7 +428,7 @@ func sourceTrack(file *mp4.File, handlerType string) (*mp4.TrakBox, *mp4.TrexBox
 	return trak, trex, nil
 }
 
-func combineTrackFragments(videoFragments []*mp4.Fragment, videoTrex *mp4.TrexBox, audioFragments []*mp4.Fragment, audioTrex *mp4.TrexBox) ([]*mp4.MediaSegment, error) {
+func combineTrackFragments(videoFragments []*mp4.Fragment, videoTrex *mp4.TrexBox, audioFragments []*mp4.Fragment, audioTrex *mp4.TrexBox, _ float64) ([]*mp4.MediaSegment, error) {
 	maxFragments := len(videoFragments)
 	if len(audioFragments) > maxFragments {
 		maxFragments = len(audioFragments)

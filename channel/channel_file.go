@@ -761,12 +761,19 @@ func removeFileWithRetry(path string) error {
 // to the front for immediate playback.  Falls back to a re-encode if stream
 // copy fails (some fragmented MP4 files can't be remuxed with -c copy).
 //
+// Stream-copy path uses -copyts to preserve relative A/V timing relationships
+// and -start_at_zero to shift the global timeline so the earliest timestamp is
+// zero.  The re-encode fallback uses aresample=async=1 to correct any gradual
+// audio drift that may have accumulated during a long recording (fractional
+// clock mismatch between the audio and video encoder clocks).
+//
 // warn is an optional logger (nil-safe) used to report A/V realignment.
 func normalizeFMP4Timestamps(videoPath string, warn func(string)) (string, error) {
 	tmpPath := videoPath + ".normalized.mp4"
 	ok := false
 
-	// Attempt 1: fast stream-copy remux with -fflags +genpts.
+	// Attempt 1: fast stream-copy remux with -copyts -start_at_zero to
+	// shift the whole timeline to zero while preserving A/V relationships.
 	func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
@@ -774,6 +781,8 @@ func normalizeFMP4Timestamps(videoPath string, warn func(string)) (string, error
 		defer config.ReleaseFFmpeg()
 		err := config.FFmpegCommandContext(ctx,
 			"-y",
+			"-copyts",
+			"-start_at_zero",
 			"-fflags", "+genpts",
 			"-i", videoPath,
 			"-c", "copy",
@@ -790,6 +799,10 @@ func normalizeFMP4Timestamps(videoPath string, warn func(string)) (string, error
 		os.Remove(tmpPath)
 
 		// Attempt 2: re-encode with libx264 to force clean timestamps.
+		// aresample=async=1 corrects gradual A/V drift that happens when
+		// audio and video encoder clocks differ fractionally over a long
+		// recording — audio gets silently stretched or compressed to match
+		// the video presentation timeline.
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 		config.AcquireFFmpeg()
@@ -801,6 +814,7 @@ func normalizeFMP4Timestamps(videoPath string, warn func(string)) (string, error
 			"-preset", "ultrafast",
 			"-crf", "28",
 			"-c:a", "aac",
+			"-af", "aresample=async=1:first_pts=0",
 			"-movflags", "+faststart",
 			tmpPath,
 		).Run()
@@ -815,6 +829,9 @@ func normalizeFMP4Timestamps(videoPath string, warn func(string)) (string, error
 	}
 
 	// Remove any residual initial A/V offset so audio and video start together.
+	// After the MuxAV probe-based fix this should almost never trigger, but it
+	// remains as a safety net for the single-stream (non-separate-AV) path and
+	// the merge path.
 	aligned, aerr := alignAVStart(videoPath, warn)
 	if aerr != nil {
 		// Non-fatal — keep the normalized file as-is.
@@ -890,6 +907,10 @@ func probeStreamStartTimes(path string) (videoStart, audioStart float64, err err
 // using -itsoffset, which runs at the demuxer so it is a stream-copy operation
 // — no re-encode, so video quality is untouched.  Offsets smaller than the
 // threshold are left alone as they are imperceptible.
+//
+// Additionally, this function warns if the total video duration and audio
+// duration differ significantly, which would indicate gradual drift in
+// addition to the initial offset.
 func alignAVStart(path string, warn func(string)) (string, error) {
 	vStart, aStart, err := probeStreamStartTimes(path)
 	if err != nil {
@@ -905,10 +926,18 @@ func alignAVStart(path string, warn func(string)) (string, error) {
 	offset := aStart - vStart
 	const threshold = 0.05
 	if math.Abs(offset) < threshold {
+		// No meaningful initial offset, but also check for gradual drift by
+		// comparing per-stream durations.
+		if warn != nil {
+			driftMsg := checkAVDrift(path)
+			if driftMsg != "" {
+				warn(driftMsg)
+			}
+		}
 		return path, nil // already aligned within perception threshold
 	}
 	if warn != nil {
-		warn(fmt.Sprintf("audio/video start offset %.3fs detected; realigning audio to video start", offset))
+		warn(fmt.Sprintf("align: audio/video start offset %.3fs detected; realigning audio to video start", offset))
 	}
 
 	// Feed the file twice: input 0 is video (no shift), input 1 is audio shifted
@@ -937,7 +966,62 @@ func alignAVStart(path string, warn func(string)) (string, error) {
 		os.Remove(tmpPath)
 		return path, nil
 	}
+	if warn != nil {
+		warn(fmt.Sprintf("align: successfully shifted audio by %.3fs", shift))
+	}
 	return path, nil
+}
+
+// checkAVDrift probes a muxed file and warns if the audio and video streams
+// have significantly different durations, which would indicate gradual drift
+// beyond a constant initial offset.  Returns a non-empty warning message or "".
+func checkAVDrift(path string) string {
+	probeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, perr := config.FFprobeCommandContext(probeCtx,
+		"-v", "error",
+		"-select_streams", "v:0,a:0",
+		"-show_entries", "stream=codec_type,duration",
+		"-of", "json",
+		path,
+	).Output()
+	if perr != nil {
+		return ""
+	}
+	var p struct {
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			Duration  string `json:"duration"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &p); err != nil {
+		return ""
+	}
+	parse := func(s string) float64 {
+		v, e := strconv.ParseFloat(s, 64)
+		if e != nil {
+			return 0
+		}
+		return v
+	}
+	var vDur, aDur float64
+	for _, s := range p.Streams {
+		switch s.CodecType {
+		case "video":
+			vDur = parse(s.Duration)
+		case "audio":
+			aDur = parse(s.Duration)
+		}
+	}
+	if vDur <= 0 || aDur <= 0 {
+		return ""
+	}
+	diff := vDur - aDur
+	if math.Abs(diff) > 1.0 {
+		// Significant duration difference — possible gradual drift.
+		return fmt.Sprintf("align: stream duration mismatch (video=%.2fs, audio=%.2fs, Δ=%.2fs) — possible gradual A/V drift", vDur, aDur, diff)
+	}
+	return ""
 }
 
 // dateSeparatorRe matches the "_YYYY-MM-DD_" / "_YYYY-MM-DD-" timestamp separator
@@ -1363,9 +1447,12 @@ func mergeVideos(inputs []string, outputPath string) error {
 
 	// Force timestamps to start at zero on every segment boundary.
 	// The setpts/asetpts filters reset the timeline so there are no gaps.
+	// aresample=async=1 corrects gradual A/V drift by resampling audio to
+	// match the video clock — important when concatenating segments that
+	// were recorded at slightly different audio clock rates.
 	reEncodeArgs = append(reEncodeArgs,
 		"-vf", "setpts=PTS-STARTPTS",
-		"-af", "asetpts=PTS-STARTPTS",
+		"-af", "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
 		"-movflags", "+faststart",
 		outputPath,
 	)
